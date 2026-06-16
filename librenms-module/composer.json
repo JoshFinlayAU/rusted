@@ -1,0 +1,34 @@
+{
+    "name": "athena-networks/rusted-librenms",
+    "description": "LibreNMS plugin for rusted — network configuration backups",
+    "keywords": ["librenms", "plugin", "rusted", "backup", "rancid", "oxidized"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Athena Networks",
+            "email": "josh@athenanetworks.com.au"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "AthenaNetworks\\RustedLibrenms\\": "src/"
+        }
+    },
+    "require": {
+        "php": "^8.2",
+        "librenms/plugin-interfaces": "^1.0"
+    },
+    "suggest": {
+        "illuminate/support": "for the Laravel integration",
+        "illuminate/contracts": "for the Laravel integration"
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "AthenaNetworks\\RustedLibrenms\\RustedServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

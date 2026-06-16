@@ -1,0 +1,14 @@
+# Compiled binary
+/rusted
+/rusted.exe
+
+# Runtime state
+/rusted.db
+/rusted.db-shm
+/rusted.db-wal
+
+# The backup repository is its own git repo; don't nest it in this one.
+/backups/
+
+# Local env / secrets
+.env
