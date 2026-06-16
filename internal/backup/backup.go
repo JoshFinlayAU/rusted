@@ -30,11 +30,11 @@ func New(st *store.Store, gs *gitstore.Store) *Engine {
 
 // Result is the outcome of backing up a single device.
 type Result struct {
-	Device  string
-	Status  string // "success", "unchanged", "failed"
-	Message string
-	Commit  string
-	Bytes   int
+	Device  string `json:"device"`
+	Status  string `json:"status"` // "success", "unchanged", "failed"
+	Message string `json:"message"`
+	Commit  string `json:"commit"`
+	Bytes   int    `json:"bytes"`
 }
 
 // BackupDevice backs up one device by name and records the run.

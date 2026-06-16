@@ -4,33 +4,33 @@ namespace AthenaNetworks\RustedLibrenms\Controllers;
 
 use AthenaNetworks\RustedLibrenms\Support\RustedClient;
 use Illuminate\Contracts\View\View;
-use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 
 class RustedController extends Controller
 {
+    /** Render the page shell; all data is loaded by the browser via AJAX. */
     public function index(): View
     {
-        $devices = [];
-        $drivers = [];
-        $error = null;
-        try {
-            $devices = RustedClient::devices();
-            $drivers = RustedClient::drivers();
-        } catch (\Throwable $e) {
-            $error = 'Could not reach the rusted API: '.$e->getMessage();
-        }
-
-        return view('rusted::page', [
-            'title' => 'Rusted Backups',
-            'devices' => $devices,
-            'drivers' => $drivers,
-            'apiError' => $error,
-        ]);
+        return view('rusted::page', ['title' => 'Rusted Backups']);
     }
 
-    public function store(Request $request): RedirectResponse
+    // --- AJAX/JSON receiver -------------------------------------------------
+    // These are same-origin routes the browser calls. Each relays to the rusted
+    // API server-side and forwards rusted's JSON body and status code.
+
+    public function apiDevices(): JsonResponse
+    {
+        return $this->proxy(fn () => RustedClient::client()->get('/api/devices'));
+    }
+
+    public function apiDrivers(): JsonResponse
+    {
+        return $this->proxy(fn () => RustedClient::client()->get('/api/drivers'));
+    }
+
+    public function apiAddDevice(Request $request): JsonResponse
     {
         $data = $request->validate([
             'name' => 'required|string',
@@ -41,60 +41,46 @@ class RustedController extends Controller
             'group' => 'nullable|string',
         ]);
 
-        try {
-            $resp = RustedClient::addDevice($data);
-            if ($resp->successful()) {
-                return back()->with('status', "Device {$data['name']} added.");
-            }
-            return back()->with('error', 'Add failed: '.($resp->json('error') ?? $resp->status()));
-        } catch (\Throwable $e) {
-            return back()->with('error', 'Add failed: '.$e->getMessage());
-        }
+        return $this->proxy(fn () => RustedClient::client()->post('/api/devices', $data));
     }
 
-    public function destroy(string $name): RedirectResponse
+    public function apiRemoveDevice(string $name): JsonResponse
     {
-        try {
-            $resp = RustedClient::removeDevice($name);
-            return $resp->successful()
-                ? back()->with('status', "Device {$name} removed.")
-                : back()->with('error', 'Remove failed: '.($resp->json('error') ?? $resp->status()));
-        } catch (\Throwable $e) {
-            return back()->with('error', 'Remove failed: '.$e->getMessage());
-        }
+        return $this->proxy(fn () => RustedClient::client()->delete('/api/devices/'.rawurlencode($name)));
     }
 
-    public function backup(string $name): RedirectResponse
+    public function apiBackup(string $name): JsonResponse
     {
-        try {
-            $resp = RustedClient::backup($name);
-            if (! $resp->successful()) {
-                return back()->with('error', "Backup of {$name} failed: ".($resp->json('error') ?? $resp->status()));
-            }
-            $result = $resp->json();
-            $status = $result['Status'] ?? $result['status'] ?? 'done';
-            $msg = $result['Message'] ?? $result['message'] ?? '';
-            return back()->with('status', "Backup of {$name}: {$status}. {$msg}");
-        } catch (\Throwable $e) {
-            return back()->with('error', "Backup of {$name} failed: ".$e->getMessage());
-        }
+        return $this->proxy(fn () => RustedClient::client()->post('/api/devices/'.rawurlencode($name).'/backup'));
     }
 
-    public function history(string $name): View
+    public function apiHistory(string $name): JsonResponse
     {
-        $runs = [];
-        $error = null;
+        return $this->proxy(fn () => RustedClient::client()->get('/api/devices/'.rawurlencode($name).'/history'));
+    }
+
+    /**
+     * Execute a rusted API call and forward its JSON + status, turning any
+     * transport failure into a clean 502 so the browser always gets JSON.
+     *
+     * @param  callable(): \Illuminate\Http\Client\Response  $call
+     */
+    private function proxy(callable $call): JsonResponse
+    {
         try {
-            $runs = RustedClient::history($name);
+            $resp = $call();
         } catch (\Throwable $e) {
-            $error = $e->getMessage();
+            return response()->json(
+                ['error' => 'Could not reach the rusted API: '.$e->getMessage()],
+                502
+            );
         }
 
-        return view('rusted::history', [
-            'title' => "Backup history: {$name}",
-            'device' => $name,
-            'runs' => $runs,
-            'apiError' => $error,
-        ]);
+        $body = $resp->json();
+        if (! is_array($body)) {
+            $body = ['raw' => $resp->body()];
+        }
+
+        return response()->json($body, $resp->status() ?: 502);
     }
 }

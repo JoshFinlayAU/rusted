@@ -21,12 +21,15 @@ func initCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("database:  %s\n", flagDB)
+			fmt.Printf("database:  %s\n", cfg.DB)
 			fmt.Printf("backups:   %s\n", gs.Dir)
+			if cfg.Path != "" {
+				fmt.Printf("config:    %s\n", cfg.Path)
+			}
 			if secret.Enabled() {
-				fmt.Println("encryption: enabled (RUSTED_SECRET is set)")
+				fmt.Println("encryption: enabled")
 			} else {
-				fmt.Println("encryption: DISABLED — set RUSTED_SECRET to encrypt stored credentials")
+				fmt.Println("encryption: DISABLED — set a secret (config 'secret' or RUSTED_SECRET) to encrypt stored credentials")
 			}
 			fmt.Println("rusted initialised.")
 			return nil

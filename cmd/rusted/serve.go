@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/athenanetworks/rusted/internal/api"
 	"github.com/athenanetworks/rusted/internal/backup"
@@ -17,10 +16,13 @@ func serveCmd() *cobra.Command {
 		Short: "Run the HTTP API used by the LibreNMS integration",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if token == "" {
-				token = os.Getenv("RUSTED_API_TOKEN")
+				token = cfg.APIToken
+			}
+			if addr == "" {
+				addr = cfg.APIAddr
 			}
 			if token == "" {
-				return fmt.Errorf("an API token is required: set --token or RUSTED_API_TOKEN")
+				return fmt.Errorf("an API token is required: set it in the config file, --token, or RUSTED_API_TOKEN")
 			}
 			st, err := openStore()
 			if err != nil {
@@ -41,7 +43,7 @@ func serveCmd() *cobra.Command {
 			return http.ListenAndServe(addr, srv.Handler())
 		},
 	}
-	cmd.Flags().StringVar(&addr, "addr", env("RUSTED_API_ADDR", ":8080"), "listen address")
-	cmd.Flags().StringVar(&token, "token", "", "bearer token (or set RUSTED_API_TOKEN)")
+	cmd.Flags().StringVar(&addr, "addr", "", "listen address (default from config or :8080)")
+	cmd.Flags().StringVar(&token, "token", "", "bearer token (default from config or RUSTED_API_TOKEN)")
 	return cmd
 }

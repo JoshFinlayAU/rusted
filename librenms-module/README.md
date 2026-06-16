@@ -7,26 +7,42 @@ the `rusted serve` HTTP API.
 ## What it provides
 
 - A **Rusted Backups** menu entry.
-- A management page to **add and remove devices**.
+- A single-page UI (no reloads) to **add and remove devices**.
 - **View backup history** per device (status, timestamps, commit, detail).
-- **Trigger a backup on demand** with success/failure feedback.
+- **Trigger a backup on demand** with inline success/failure feedback.
 - A **settings page** showing API connectivity status.
 
-The LibreNMS server is the only thing that talks to the rusted API — the bearer
-token stays server-side and is never exposed to the browser.
+## Architecture — no reverse proxy needed
+
+The browser never talks to the rusted API directly. Instead, the page makes
+**same-origin AJAX calls to this plugin's own routes** under
+`plugin/rusted/api/...`, served by LibreNMS itself. The plugin's controller then
+relays each call to the rusted API server-side:
+
+```
+browser ──AJAX (same origin, session auth + CSRF)──▶ LibreNMS plugin route
+                                                          │
+                                                          ▼ (server-side)
+                                            rusted API (Bearer token)
+```
+
+Because the AJAX receiver lives inside LibreNMS, you do **not** need nginx/Apache
+reverse-proxy rules to expose rusted, and the rusted API only needs to be
+reachable **from the LibreNMS server** (e.g. bind it to `127.0.0.1:8080`). The
+bearer token stays in the LibreNMS `.env` and is never sent to the browser.
 
 ## Requirements
 
 - LibreNMS with the v2 plugin system (`app/Plugins`, the modern plugin manager).
-- A reachable `rusted serve` instance and its API token.
+- A `rusted serve` instance reachable from the LibreNMS host, and its API token.
 
 ## Install
 
-rusted's API must be running first:
+rusted's API must be running first. It can listen on loopback only, since just
+the LibreNMS server needs to reach it:
 
 ```sh
-export RUSTED_API_TOKEN="a-long-random-token"
-rusted serve --addr 0.0.0.0:8080
+rusted serve --addr 127.0.0.1:8080   # token comes from rusted's config file
 ```
 
 Then, on the LibreNMS host, install the plugin as a Composer package. From the
@@ -63,21 +79,31 @@ Open **Rusted Backups** from the main menu.
 ```
 composer.json                     package manifest (registers the provider)
 config/config.php                 api_url / api_token / timeout (from .env)
-routes/web.php                    plugin routes (plugin/rusted/...)
+routes/web.php                    page + AJAX receiver routes (plugin/rusted/...)
 src/RustedServiceProvider.php     registers hooks, routes, views, config
 src/Support/RustedClient.php      server-side HTTP client for the rusted API
 src/Hooks/MenuEntry.php           menu hook
 src/Hooks/Settings.php            settings hook
-src/Controllers/RustedController.php  list / add / remove / backup / history
-resources/views/                  menu, page, history, settings (Blade)
+src/Controllers/RustedController.php  page shell + JSON AJAX receiver
+resources/views/                  menu, page (AJAX UI), settings (Blade)
 ```
 
-## API endpoints used
+## Routes
 
-See the [rusted HTTP API](../README.md#http-api--librenms). This plugin uses:
-`GET /api/devices`, `GET /api/drivers`, `POST /api/devices`,
-`DELETE /api/devices/{name}`, `GET /api/devices/{name}/history`,
-`POST /api/devices/{name}/backup`, and `GET /healthz`.
+The page is `GET plugin/rusted`. The browser's AJAX calls hit the same-origin
+receiver (all `web`+`auth`+CSRF protected):
+
+| Method & path | Relays to rusted |
+|---|---|
+| `GET plugin/rusted/api/devices` | `GET /api/devices` |
+| `GET plugin/rusted/api/drivers` | `GET /api/drivers` |
+| `POST plugin/rusted/api/devices` | `POST /api/devices` |
+| `DELETE plugin/rusted/api/devices/{name}` | `DELETE /api/devices/{name}` |
+| `POST plugin/rusted/api/devices/{name}/backup` | `POST /api/devices/{name}/backup` |
+| `GET plugin/rusted/api/devices/{name}/history` | `GET /api/devices/{name}/history` |
+
+The receiver forwards rusted's JSON body and HTTP status, and turns any
+connection failure into a clean `502` so the UI always gets JSON.
 
 > Note: credentials are intentionally **not** managed from the web UI. Manage
 > them with the `rusted cred` CLI and reference them by name when adding a

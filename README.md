@@ -1,6 +1,6 @@
 # rusted
 
-A network device configuration backup tool — a modern, single-binary
+A network device configuration backup tool - a modern, single-binary
 replacement for **RANCID** and **Oxidized**.
 
 rusted connects to your network devices over SSH, captures their running
@@ -37,40 +37,81 @@ Officially supported (per the project spec):
 Also bundled: `cisco_ios`, `cisco_asa`, `arista_eos`, `fortinet`, `vyos`,
 `generic`. Run `rusted driver list` to see them all.
 
-## Build
+## Install
+
+The installer builds rusted, installs the binary, generates a config file with a
+random API token and encryption secret, and initialises the database and backup
+repo. Requires Go 1.26+ and `git`.
 
 ```sh
-go build -o rusted ./cmd/rusted
+./install.sh             # install for the current user (default)
+./install.sh --global    # install system-wide (uses sudo)
+./install.sh --global --service   # also install + enable a systemd service
 ```
 
-Requires Go 1.26+ and the `git` binary on `PATH`.
+| | User install | Global install |
+|---|---|---|
+| binary | `~/.local/bin/rusted` | `/usr/local/bin/rusted` |
+| config | `~/.config/rusted/config.toml` | `/etc/rusted/config.toml` |
+| data (db + backups) | `~/.local/share/rusted` | `/var/lib/rusted` |
+
+(Paths honour `XDG_*` overrides.) Re-running the installer never overwrites an
+existing config, so encrypted credentials stay readable across upgrades.
+
+To build manually instead: `go build -o rusted ./cmd/rusted`.
+
+## Configuration
+
+Settings resolve in this order (later wins):
+
+```
+built-in defaults  <  config file  <  environment variables  <  CLI flags
+```
+
+The config file is searched at `$RUSTED_CONFIG`, then
+`~/.config/rusted/config.toml`, then `/etc/rusted/config.toml` (override with
+`--config`). Generate one with:
+
+```sh
+rusted config init            # user-level
+rusted config init --global   # system-wide
+rusted config show            # print resolved config (secrets masked)
+```
+
+It is a small TOML-style file (mode `0600` — it holds secrets):
+
+```toml
+db        = "/var/lib/rusted/rusted.db"
+backups   = "/var/lib/rusted/backups"
+api_addr  = ":8080"
+api_token = "…"   # bearer token for the HTTP API / LibreNMS
+secret    = "…"   # AES-256-GCM key for credential encryption-at-rest
+```
+
+Each key has an environment-variable equivalent: `RUSTED_DB`, `RUSTED_BACKUPS`,
+`RUSTED_API_ADDR`, `RUSTED_API_TOKEN`, `RUSTED_SECRET`.
 
 ## Quick start
 
 ```sh
-# Initialise the database and the ./backups git repo
-./rusted init
-
-# Encrypt stored credentials at rest (recommended): keep this secret safe and
-# stable — losing it makes encrypted credentials unrecoverable.
-export RUSTED_SECRET="a-long-random-passphrase"
+# (install.sh already ran 'init' and created the config)
 
 # Add a reusable credential
-./rusted cred add lab -u admin -p 's3cret' -e 'enablepw'
+rusted cred add lab -u admin -p 's3cret' -e 'enablepw'
 #   -k ./id_ed25519   # optionally use a private key instead of/with a password
 
 # Add devices (driver = platform; group = sub-directory in the backup repo)
-./rusted device add nexus1  -H 10.0.0.1 -d cisco_nxos        -c lab -g datacenter
-./rusted device add edge-mt -H 10.0.0.2 -d mikrotik_routeros -c lab
-./rusted device add core-mx -H 10.0.0.3 -d juniper_junos     -c lab
+rusted device add nexus1  -H 10.0.0.1 -d cisco_nxos        -c lab -g datacenter
+rusted device add edge-mt -H 10.0.0.2 -d mikrotik_routeros -c lab
+rusted device add core-mx -H 10.0.0.3 -d juniper_junos     -c lab
 
 # Back up one device, or everything enabled
-./rusted backup run nexus1
-./rusted backup run --all
+rusted backup run nexus1
+rusted backup run --all
 
 # Inspect results
-./rusted backup history nexus1
-git -C backups log --oneline
+rusted backup history nexus1
+git -C "$(rusted config show | awk '/backups:/{print $2}')" log --oneline
 ```
 
 ## Command reference
@@ -78,6 +119,7 @@ git -C backups log --oneline
 | Command | Purpose |
 |---|---|
 | `rusted init` | Create the DB and backup repo |
+| `rusted config init/show` | Create or display the config file |
 | `rusted cred add/list/remove` | Manage login credentials |
 | `rusted device add/list/remove/enable/disable` | Manage device inventory |
 | `rusted driver list` | List platform drivers |
@@ -85,22 +127,26 @@ git -C backups log --oneline
 | `rusted backup history NAME` | Show a device's backup history |
 | `rusted serve` | Run the HTTP API for LibreNMS |
 
-Global flags: `--db` (default `rusted.db`, or `$RUSTED_DB`) and `--backups`
-(default `backups`, or `$RUSTED_BACKUPS`).
+Global flags: `--config`, `--db`, `--backups` (each overrides the config file
+and the corresponding `RUSTED_*` environment variable).
 
 ## Credential encryption
 
-If `RUSTED_SECRET` is set, password / private-key / enable fields are encrypted
-with AES-256-GCM before being written to SQLite (values are prefixed `enc:`).
-If it is unset, secrets are stored in plaintext and rusted warns you. Plaintext
-and encrypted rows can coexist, so you can enable encryption later — but rows
-written while encrypted require the same `RUSTED_SECRET` to read.
+If a `secret` is configured (config file `secret`, or `RUSTED_SECRET`),
+password / private-key / enable fields are encrypted with AES-256-GCM before
+being written to SQLite (values are prefixed `enc:`). If it is unset, secrets
+are stored in plaintext and rusted warns you. Plaintext and encrypted rows can
+coexist, so you can enable encryption later — but rows written while encrypted
+require the same secret to read, so **keep it stable** (the installer generates
+one once and never rotates it for you).
 
 ## HTTP API / LibreNMS
 
+The API token comes from the config file (`api_token`) or `RUSTED_API_TOKEN`:
+
 ```sh
-export RUSTED_API_TOKEN="a-long-random-token"
-./rusted serve --addr :8080
+rusted serve            # uses api_addr + api_token from config
+rusted serve --addr :8080 --token "$(openssl rand -hex 32)"
 ```
 
 All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
@@ -139,7 +185,9 @@ never create noise in your git history. A run is recorded as `success`
 ## Project layout
 
 ```
+install.sh          user/global installer
 cmd/rusted/         CLI (cobra)
+internal/config/    config file + env + flag resolution
 internal/store/     SQLite: credentials, devices, run history
 internal/secret/    AES-GCM encryption-at-rest
 internal/transport/ transport interface + SSH implementation
