@@ -30,6 +30,33 @@ class RustedController extends Controller
         return $this->proxy(fn () => RustedClient::client()->get('/api/drivers'));
     }
 
+    public function apiCredentials(): JsonResponse
+    {
+        return $this->proxy(fn () => RustedClient::client()->get('/api/credentials'));
+    }
+
+    public function apiAddCredential(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'name' => 'required|string',
+            'username' => 'required|string',
+            'password' => 'nullable|string',
+            'enable' => 'nullable|string',
+        ]);
+
+        return $this->proxy(fn () => RustedClient::client()->post('/api/credentials', $data));
+    }
+
+    public function apiRemoveCredential(string $name): JsonResponse
+    {
+        return $this->proxy(fn () => RustedClient::client()->delete('/api/credentials/'.rawurlencode($name)));
+    }
+
+    public function apiDevice(string $name): JsonResponse
+    {
+        return $this->proxy(fn () => RustedClient::client()->get('/api/devices/'.rawurlencode($name)));
+    }
+
     public function apiAddDevice(Request $request): JsonResponse
     {
         $data = $request->validate([

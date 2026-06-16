@@ -161,7 +161,13 @@ All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
 | `GET /api/devices/{name}/history` | Backup history |
 | `GET /api/devices/{name}/config` | Latest stored config (text) |
 | `POST /api/devices/{name}/backup` | Trigger a backup now |
+| `GET /api/credentials` | List credentials (no secrets returned) |
+| `POST /api/credentials` | Add a credential (name, username, password, enable) |
+| `DELETE /api/credentials/{name}` | Remove a credential |
 | `GET /api/drivers` | List drivers |
+
+The credential `GET` only reports whether a password/key/enable is set — it never
+returns secret material.
 
 The LibreNMS plugin that consumes this API lives in
 [`librenms-module/`](librenms-module/README.md).
@@ -175,11 +181,84 @@ content actually changed** — so timestamps, uptimes, and "last changed" banner
 never create noise in your git history. A run is recorded as `success`
 (committed), `unchanged` (no diff), or `failed`.
 
+## Scheduled backups
+
+`rusted backup run --all` backs up every enabled device, then exits — ideal for
+a scheduler. It exits non-zero if any device failed, so cron/systemd surface
+failures. Always pass `--config` (a scheduler's environment is minimal) and an
+absolute path to the binary.
+
+### Option A — cron
+
+Edit the crontab of the user that owns the data directory (`crontab -e`, or
+`sudo crontab -e` for a global install owned by root):
+
+```cron
+# Back up all devices every day at 02:00, one run at a time, with a log.
+0 2 * * * /usr/bin/flock -n /tmp/rusted-backup.lock \
+  /usr/local/bin/rusted --config /etc/rusted/config.toml backup run --all \
+  >> /var/log/rusted-backup.log 2>&1
+```
+
+- `flock -n` prevents a slow run from overlapping the next one.
+- Add `MAILTO=you@example.com` at the top of the crontab to be emailed on
+  failure (cron mails any output; the non-zero exit also flags it).
+- For a **user install**, use your paths instead, e.g.
+  `~/.local/bin/rusted --config ~/.config/rusted/config.toml backup run --all`.
+
+### Option B — systemd timer
+
+More robust than cron (logging via journald, no overlap, easy status). Create
+two unit files:
+
+`/etc/systemd/system/rusted-backup.service`:
+
+```ini
+[Unit]
+Description=rusted — back up all network device configs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rusted --config /etc/rusted/config.toml backup run --all
+# User=rusted        # if you run rusted under a dedicated account
+```
+
+`/etc/systemd/system/rusted-backup.timer`:
+
+```ini
+[Unit]
+Description=Run rusted backups on a schedule
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true          # catch up if the machine was off at 02:00
+RandomizedDelaySec=300   # optional: jitter to avoid hammering devices at once
+
+[Install]
+WantedBy=timers.target
+```
+
+Then enable it:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now rusted-backup.timer
+systemctl list-timers rusted-backup.timer   # confirm next run
+journalctl -u rusted-backup.service         # view backup output
+```
+
+Run it once by hand to verify: `sudo systemctl start rusted-backup.service`.
+
+> Tip: this is independent of `rusted serve`. You can run the API service
+> (`--service` in the installer) *and* a backup timer side by side.
+
 ## Roadmap
 
 - `known_hosts` host-key pinning (SSH currently accepts any host key).
 - Concurrent `--all` backups with a worker pool.
-- Scheduled backups (cron) and webhook/Slack notifications.
+- Webhook/Slack notifications on backup failure.
 - Telnet and NETCONF transports.
 
 ## Project layout

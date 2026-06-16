@@ -55,12 +55,38 @@
                 <select class="form-control input-sm" name="driver" id="rusted-driver" required>
                     <option value="" disabled selected>driver</option>
                 </select>
-                <input class="form-control input-sm" type="text" name="credential" placeholder="credential" required>
+                <select class="form-control input-sm" name="credential" id="rusted-credential" required>
+                    <option value="" disabled selected>credential</option>
+                </select>
                 <input class="form-control input-sm" type="text" name="group" placeholder="group (optional)">
                 <button class="btn btn-sm btn-success" type="submit"><i class="fa fa-plus"></i> Add</button>
             </form>
             <p class="help-block" style="margin-top:8px">
-                Credentials are managed with the <code>rusted cred</code> CLI; reference an existing credential by name.
+                Pick a credential below, or add one with the Credentials panel.
+            </p>
+        </div>
+    </div>
+
+    <div class="panel panel-default">
+        <div class="panel-heading"><strong>Credentials</strong></div>
+        <div class="panel-body">
+            <table class="table table-condensed table-hover">
+                <thead>
+                    <tr><th>Name</th><th>Username</th><th>Password</th><th>Key</th><th>Enable</th><th>Actions</th></tr>
+                </thead>
+                <tbody id="rusted-credentials">
+                    <tr><td colspan="6"><em>Loading&hellip;</em></td></tr>
+                </tbody>
+            </table>
+            <form id="rusted-cred-add" class="form-inline">
+                <input class="form-control input-sm" type="text" name="name" placeholder="name" required>
+                <input class="form-control input-sm" type="text" name="username" placeholder="username" required autocomplete="off">
+                <input class="form-control input-sm" type="password" name="password" placeholder="password" autocomplete="new-password">
+                <input class="form-control input-sm" type="password" name="enable" placeholder="enable secret (optional)" autocomplete="new-password">
+                <button class="btn btn-sm btn-success" type="submit"><i class="fa fa-plus"></i> Add credential</button>
+            </form>
+            <p class="help-block" style="margin-top:8px">
+                Passwords are sent once to rusted, encrypted at rest, and never returned to the browser.
             </p>
         </div>
     </div>
@@ -80,6 +106,9 @@
     const $historyPanel = document.getElementById('rusted-history-panel');
     const $history = document.getElementById('rusted-history');
     const $historyDevice = document.getElementById('rusted-history-device');
+    const $credentials = document.getElementById('rusted-credentials');
+    const $credForm = document.getElementById('rusted-cred-add');
+    const $credential = document.getElementById('rusted-credential');
 
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
@@ -173,6 +202,42 @@
         }
     }
 
+    function renderCredentials(creds) {
+        // Populate the device-form credential dropdown.
+        const current = $credential.value;
+        $credential.innerHTML = '<option value="" disabled selected>credential</option>' +
+            (creds || []).map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
+        if (current) $credential.value = current;
+
+        // Populate the credentials table.
+        if (!creds || !creds.length) {
+            $credentials.innerHTML = '<tr><td colspan="6"><em>No credentials yet.</em></td></tr>';
+            return;
+        }
+        $credentials.innerHTML = creds.map(function (c) {
+            const yn = b => b ? label('yes', 'success') : label('no', 'default');
+            const n = esc(c.name);
+            return '<tr>' +
+                '<td>' + esc(c.name) + '</td>' +
+                '<td>' + esc(c.username) + '</td>' +
+                '<td>' + yn(c.has_password) + '</td>' +
+                '<td>' + yn(c.has_key) + '</td>' +
+                '<td>' + yn(c.has_enable) + '</td>' +
+                '<td><button class="btn btn-xs btn-danger" data-action="remove-cred" data-name="' + n + '">' +
+                    '<i class="fa fa-trash"></i> Remove</button></td>' +
+            '</tr>';
+        }).join('');
+    }
+
+    async function loadCredentials() {
+        try {
+            renderCredentials(await api('GET', '/credentials'));
+        } catch (e) {
+            $credentials.innerHTML = '<tr><td colspan="6"><em>Could not load credentials.</em></td></tr>';
+            alertBox('warning', e.message);
+        }
+    }
+
     async function doBackup(name, btn) {
         const original = btn.innerHTML;
         btn.disabled = true;
@@ -240,7 +305,47 @@
         else if (btn.dataset.action === 'history') showHistory(name);
     });
 
-    document.getElementById('rusted-refresh').addEventListener('click', loadDevices);
+    // Event delegation for credential remove buttons.
+    $credentials.addEventListener('click', function (e) {
+        const btn = e.target.closest('button[data-action="remove-cred"]');
+        if (!btn) return;
+        doRemoveCredential(btn.getAttribute('data-name'));
+    });
+
+    async function doRemoveCredential(name) {
+        if (!confirm('Remove credential ' + name + '?')) return;
+        try {
+            await api('DELETE', '/credentials/' + encodeURIComponent(name));
+            alertBox('success', 'Credential ' + name + ' removed.');
+            loadCredentials();
+        } catch (e) {
+            alertBox('danger', 'Remove failed: ' + e.message);
+        }
+    }
+
+    $credForm.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const fd = new FormData($credForm);
+        const payload = {
+            name: fd.get('name'),
+            username: fd.get('username'),
+            password: fd.get('password') || '',
+            enable: fd.get('enable') || '',
+        };
+        try {
+            await api('POST', '/credentials', payload);
+            alertBox('success', 'Credential ' + payload.name + ' added.');
+            $credForm.reset();
+            loadCredentials();
+        } catch (e) {
+            alertBox('danger', 'Add failed: ' + e.message);
+        }
+    });
+
+    document.getElementById('rusted-refresh').addEventListener('click', function () {
+        loadDevices();
+        loadCredentials();
+    });
     document.getElementById('rusted-history-close').addEventListener('click', function () {
         $historyPanel.style.display = 'none';
     });
@@ -269,6 +374,7 @@
 
     // Initial load.
     loadDrivers();
+    loadCredentials();
     loadDevices();
 })();
 </script>

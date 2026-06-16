@@ -3,9 +3,11 @@
 namespace AthenaNetworks\RustedLibrenms;
 
 use Illuminate\Support\ServiceProvider;
+use LibreNMS\Interfaces\Plugins\Hooks\DeviceOverviewHook;
 use LibreNMS\Interfaces\Plugins\Hooks\MenuEntryHook;
 use LibreNMS\Interfaces\Plugins\Hooks\SettingsHook;
 use LibreNMS\Interfaces\Plugins\PluginManagerInterface;
+use AthenaNetworks\RustedLibrenms\Hooks\DeviceOverview;
 use AthenaNetworks\RustedLibrenms\Hooks\MenuEntry;
 use AthenaNetworks\RustedLibrenms\Hooks\Settings;
 
@@ -25,6 +27,7 @@ class RustedServiceProvider extends ServiceProvider
         // Register hooks so LibreNMS surfaces the plugin in its UI.
         $pluginManager->publishHook(self::PLUGIN, MenuEntryHook::class, MenuEntry::class);
         $pluginManager->publishHook(self::PLUGIN, SettingsHook::class, Settings::class);
+        $pluginManager->publishHook(self::PLUGIN, DeviceOverviewHook::class, DeviceOverview::class);
 
         if (! $pluginManager->pluginEnabled(self::PLUGIN)) {
             return;

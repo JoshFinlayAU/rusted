@@ -38,6 +38,9 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /api/drivers", s.listDrivers)
+	mux.HandleFunc("GET /api/credentials", s.listCredentials)
+	mux.HandleFunc("POST /api/credentials", s.createCredential)
+	mux.HandleFunc("DELETE /api/credentials/{name}", s.deleteCredential)
 	mux.HandleFunc("GET /api/devices", s.listDevices)
 	mux.HandleFunc("POST /api/devices", s.createDevice)
 	mux.HandleFunc("GET /api/devices/{name}", s.getDevice)
@@ -74,6 +77,69 @@ func (s *Server) listDrivers(w http.ResponseWriter, r *http.Request) {
 		out = append(out, drvDTO{d.Name, d.Description})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// credentialDTO never exposes secret material — only whether it is set.
+type credentialDTO struct {
+	Name        string `json:"name"`
+	Username    string `json:"username"`
+	HasPassword bool   `json:"has_password"`
+	HasKey      bool   `json:"has_key"`
+	HasEnable   bool   `json:"has_enable"`
+}
+
+func (s *Server) listCredentials(w http.ResponseWriter, r *http.Request) {
+	creds, err := s.Store.ListCredentials()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out := make([]credentialDTO, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, credentialDTO{
+			Name: c.Name, Username: c.Username,
+			HasPassword: c.Password != "", HasKey: c.PrivateKey != "", HasEnable: c.Enable != "",
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) createCredential(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name       string `json:"name"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		Enable     string `json:"enable"`
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if in.Name == "" || in.Username == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and username are required"})
+		return
+	}
+	if _, err := s.Store.CreateCredential(&store.Credential{
+		Name: in.Name, Username: in.Username, Password: in.Password, Enable: in.Enable, PrivateKey: in.PrivateKey,
+	}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"status": "created", "name": in.Name})
+}
+
+func (s *Server) deleteCredential(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.DeleteCredential(r.PathValue("name")); err != nil {
+		// DeleteCredential returns a descriptive error when still in use.
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 type deviceDTO struct {

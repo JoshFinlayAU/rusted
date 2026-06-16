@@ -8,8 +8,14 @@ the `rusted serve` HTTP API.
 
 - A **Rusted Backups** menu entry.
 - A single-page UI (no reloads) to **add and remove devices**.
+- **Manage credentials in the web UI** — enter username/password/enable directly;
+  they are sent once to rusted, encrypted at rest, and never returned to the
+  browser.
 - **View backup history** per device (status, timestamps, commit, detail).
 - **Trigger a backup on demand** with inline success/failure feedback.
+- A **Configuration Backups panel on every device's Overview page** showing the
+  last backup, a "Back up now" button, and a one-click "Add to rusted" when the
+  device isn't managed yet (matched on hostname).
 - A **settings page** showing API connectivity status.
 
 ## Architecture — no reverse proxy needed
@@ -84,8 +90,9 @@ src/RustedServiceProvider.php     registers hooks, routes, views, config
 src/Support/RustedClient.php      server-side HTTP client for the rusted API
 src/Hooks/MenuEntry.php           menu hook
 src/Hooks/Settings.php            settings hook
+src/Hooks/DeviceOverview.php      per-device Overview-page panel hook
 src/Controllers/RustedController.php  page shell + JSON AJAX receiver
-resources/views/                  menu, page (AJAX UI), settings (Blade)
+resources/views/                  menu, page, device-overview, settings (Blade)
 ```
 
 ## Routes
@@ -96,11 +103,15 @@ receiver (all `web`+`auth`+CSRF protected):
 | Method & path | Relays to rusted |
 |---|---|
 | `GET plugin/rusted/api/devices` | `GET /api/devices` |
-| `GET plugin/rusted/api/drivers` | `GET /api/drivers` |
+| `GET plugin/rusted/api/devices/{name}` | `GET /api/devices/{name}` |
 | `POST plugin/rusted/api/devices` | `POST /api/devices` |
 | `DELETE plugin/rusted/api/devices/{name}` | `DELETE /api/devices/{name}` |
 | `POST plugin/rusted/api/devices/{name}/backup` | `POST /api/devices/{name}/backup` |
 | `GET plugin/rusted/api/devices/{name}/history` | `GET /api/devices/{name}/history` |
+| `GET plugin/rusted/api/credentials` | `GET /api/credentials` |
+| `POST plugin/rusted/api/credentials` | `POST /api/credentials` |
+| `DELETE plugin/rusted/api/credentials/{name}` | `DELETE /api/credentials/{name}` |
+| `GET plugin/rusted/api/drivers` | `GET /api/drivers` |
 
 The receiver forwards rusted's JSON body and HTTP status, and turns any
 connection failure into a clean `502` so the UI always gets JSON.
