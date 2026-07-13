@@ -48,6 +48,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/devices/{name}", s.deleteDevice)
 	mux.HandleFunc("GET /api/devices/{name}/history", s.deviceHistory)
 	mux.HandleFunc("GET /api/devices/{name}/config", s.deviceConfig)
+	mux.HandleFunc("GET /api/devices/{name}/versions", s.deviceVersions)
+	mux.HandleFunc("GET /api/devices/{name}/diff", s.deviceDiff)
 	mux.HandleFunc("POST /api/devices/{name}/backup", s.triggerBackup)
 	mux.HandleFunc("POST /api/provision/mikrotik-ssh-key", s.provisionMikrotikSSHKey)
 	return s.auth(mux)
@@ -277,24 +279,115 @@ func (s *Server) deviceHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deviceConfig(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	d, err := s.Store.GetDevice(name)
+	d, rel, ok := s.deviceRel(w, r)
+	if !ok {
+		return
+	}
+	// ?commit=<hash> serves that stored version; otherwise the latest on disk.
+	var cfg string
+	var err error
+	if commit := r.URL.Query().Get("commit"); commit != "" {
+		if !validCommit(commit) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid commit"})
+			return
+		}
+		cfg, err = s.Git.At(rel, commit)
+	} else {
+		cfg, err = s.Git.Latest(rel)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no backup yet"})
+		return
+	}
+	_ = d
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(cfg))
+}
+
+// deviceVersions lists the git history of a device's config file (one entry per
+// change), newest first, so the UI can pick versions to view or diff.
+func (s *Server) deviceVersions(w http.ResponseWriter, r *http.Request) {
+	_, rel, ok := s.deviceRel(w, r)
+	if !ok {
+		return
+	}
+	lines, err := s.Git.Log(rel, 100)
+	if err != nil {
+		writeJSON(w, http.StatusOK, []any{}) // no history yet
+		return
+	}
+	type version struct {
+		Commit  string `json:"commit"`
+		Date    string `json:"date"`
+		Subject string `json:"subject"`
+	}
+	out := make([]version, 0, len(lines))
+	for _, ln := range lines {
+		// "<hash> <YYYY-MM-DD> <subject...>"
+		parts := strings.SplitN(ln, " ", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		v := version{Commit: parts[0], Date: parts[1]}
+		if len(parts) == 3 {
+			v.Subject = parts[2]
+		}
+		out = append(out, v)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// deviceDiff returns a unified diff of a device's config. ?from=<hash> alone shows
+// what that backup changed; ?from=<a>&to=<b> diffs two versions.
+func (s *Server) deviceDiff(w http.ResponseWriter, r *http.Request) {
+	_, rel, ok := s.deviceRel(w, r)
+	if !ok {
+		return
+	}
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	if from != "" && !validCommit(from) || to != "" && !validCommit(to) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid commit"})
+		return
+	}
+	diff, err := s.Git.Diff(rel, from, to)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such version"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(diff))
+}
+
+// deviceRel resolves a device by the {name} path value and its config file's repo-relative
+// path, writing an error response and returning ok=false on failure.
+func (s *Server) deviceRel(w http.ResponseWriter, r *http.Request) (*store.Device, string, bool) {
+	d, err := s.Store.GetDevice(r.PathValue("name"))
 	if err != nil {
 		writeErr(w, err)
-		return
+		return nil, "", false
 	}
 	rel := d.Name + ".cfg"
 	if d.Group != "" {
 		rel = d.Group + "/" + rel
 	}
-	cfg, err := s.Git.Latest(rel)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no backup yet"})
-		return
+	return d, rel, true
+}
+
+// validCommit allows only hex commit hashes (what our own /versions hands out), so a
+// query value can't smuggle arbitrary git refspecs/options into a git command.
+func validCommit(s string) bool {
+	if len(s) < 4 || len(s) > 40 {
+		return false
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(cfg))
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) triggerBackup(w http.ResponseWriter, r *http.Request) {

@@ -117,6 +117,28 @@ func (s *Store) Latest(relPath string) (string, error) {
 	return string(b), nil
 }
 
+// At returns the stored content of relPath as it was at a specific commit
+// (git show <commit>:<relPath>). The commit ref is validated by the caller.
+func (s *Store) At(relPath, commit string) (string, error) {
+	return s.git("show", commit+":"+filepath.Clean(relPath))
+}
+
+// Diff returns a unified diff of relPath between two commits. An empty `to`
+// means HEAD; an empty `from` diffs the commit against its own parent, which is
+// the natural "what changed in this backup" view.
+func (s *Store) Diff(relPath, from, to string) (string, error) {
+	rel := filepath.Clean(relPath)
+	if from != "" && to == "" {
+		// Changes introduced by `from` itself. diff-tree --root makes even the first
+		// backup (no parent) show as a full addition rather than erroring.
+		return s.git("diff-tree", "-p", "--root", "--no-commit-id", from, "--", rel)
+	}
+	if to == "" {
+		to = "HEAD"
+	}
+	return s.git("diff", from, to, "--", rel)
+}
+
 // Log returns up to n short log entries ("<hash> <subject>") for relPath.
 func (s *Store) Log(relPath string, n int) ([]string, error) {
 	out, err := s.git("log", fmt.Sprintf("-n%d", n), "--pretty=format:%h %ad %s", "--date=short", "--", relPath)

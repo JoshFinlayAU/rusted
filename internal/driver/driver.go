@@ -165,6 +165,7 @@ func builtins() []Driver {
 			// hidden by default in v7 (good for a git-stored backup).
 			Config: []string{"/export terse"},
 			Strip: []*regexp.Regexp{
+				re(`^\[[^\]]*\] >`),     // echoed prompt+command line ("[user@host] > /export terse")
 				re(`^# .* by RouterOS`), // leading "# <timestamp> by RouterOS 7.x"
 				re(`^# software id =`),
 				re(`^# model =`),
