@@ -62,6 +62,33 @@ Additional drivers (`cisco_ios`, `cisco_asa`, `arista_eos`, `fortinet`,
 > `POST /api/provision/mikrotik-ssh-key` installs a generated key over the API and hands
 > back the private key to back up with (see internal/provision).
 
+## Cambium (drafts)
+
+Two Cambium platforms expose their config over an SSH command and get **draft** drivers
+(marked DRAFT in the description - validate against real gear before you trust them):
+
+| Name | Platform | Config command |
+|---|---|---|
+| `cambium_epmp` | Cambium ePMP (AP/SM) | `config show json` |
+| `cambium_cnmatrix` | Cambium cnMatrix switch | `show running-config` |
+
+- **ePMP** dumps its whole config as JSON. The `cfgUtcTimestamp` line is stripped so an
+  unchanged unit doesn't diff every run; confirm the JSON is one-field-per-line on your
+  firmware (if it's minified onto a single line, that strip would drop everything - adjust).
+- **cnMatrix** is Cisco-like; the paging-disable `Init` command is a best guess - if the
+  switch pages output, change it to whatever your firmware uses.
+
+The rest of the Cambium/PTP range does **not** expose config over an SSH stdout command, so
+they can't be plain drivers:
+
+- **PMP450 / PTP650** - config only comes from the **web GUI** (oxidized scrapes the HTTP
+  `.cfg` file) or SNMP. Needs an HTTP transport (not built yet).
+- **PTP820 / PTP850** (Ceragon IP-20 based) - config is exported as a **file pushed to an
+  FTP/SFTP server**, not printed to a CLI session. Needs a file-fetch step, similar to the
+  MikroTik `/export file=` case.
+
+Those three are noted here so nobody assumes an SSH driver will cover them.
+
 ## Example
 
 ```go
