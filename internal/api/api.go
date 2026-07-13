@@ -20,6 +20,7 @@ import (
 	"github.com/athenanetworks/rusted/internal/backup"
 	"github.com/athenanetworks/rusted/internal/driver"
 	"github.com/athenanetworks/rusted/internal/gitstore"
+	"github.com/athenanetworks/rusted/internal/provision"
 	"github.com/athenanetworks/rusted/internal/store"
 )
 
@@ -48,6 +49,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices/{name}/history", s.deviceHistory)
 	mux.HandleFunc("GET /api/devices/{name}/config", s.deviceConfig)
 	mux.HandleFunc("POST /api/devices/{name}/backup", s.triggerBackup)
+	mux.HandleFunc("POST /api/provision/mikrotik-ssh-key", s.provisionMikrotikSSHKey)
 	return s.auth(mux)
 }
 
@@ -216,6 +218,33 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "created", "name": in.Name})
+}
+
+// provisionMikrotikSSHKey installs a generated SSH public key on a RouterOS device over
+// its API and returns the private key, so the caller can back the device up over SSH with
+// a key (RouterOS won't return a full config over the API itself). The caller supplies the
+// API login; the secrets go no further than this loopback call and the device.
+func (s *Server) provisionMikrotikSSHKey(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Host     string `json:"host"`
+		Port     int    `json:"port"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if in.Host == "" || in.Username == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host and username are required"})
+		return
+	}
+	res, err := provision.MikrotikSSHKey(in.Host, in.Port, in.Username, in.Password, s.Engine.Timeout)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) deleteDevice(w http.ResponseWriter, r *http.Request) {

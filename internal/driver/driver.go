@@ -172,20 +172,6 @@ func builtins() []Driver {
 			},
 		},
 		{
-			Name:        "mikrotik_routeros_api",
-			Description: "MikroTik RouterOS v7+ over the binary API (use with the routeros-api transport)",
-			// Over the API the export is fetched with a plain "/export"; the console-only
-			// "terse" flag doesn't apply. Same volatile-header lines are stripped in case
-			// the agent includes them.
-			Config: []string{"/export"},
-			Strip: []*regexp.Regexp{
-				re(`^# .* by RouterOS`),
-				re(`^# software id =`),
-				re(`^# model =`),
-				re(`^# serial number =`),
-			},
-		},
-		{
 			Name:        "vyos",
 			Description: "VyOS / Vyatta",
 			Init:        []string{"set terminal length 0"},
