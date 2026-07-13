@@ -172,6 +172,33 @@ func builtins() []Driver {
 			},
 		},
 		{
+			// DRAFT - drafted from Cambium's ePMP CLI guide + the oxidized cambiumepmp
+			// model; validate against real gear before relying on it. ePMP dumps its whole
+			// config as JSON over SSH ("config show json"). The cfgUtcTimestamp field is
+			// volatile, so drop that line (assumes pretty-printed JSON, one field per line -
+			// confirm the output format on your firmware). RawNormalize so the generic
+			// timestamp masker doesn't rewrite JSON values.
+			Name:         "cambium_epmp",
+			Description:  "Cambium ePMP (SSH CLI, JSON export) - DRAFT, validate against gear",
+			Config:       []string{"config show json"},
+			Strip:        []*regexp.Regexp{re(`cfgUtcTimestamp`)},
+			RawNormalize: true,
+		},
+		{
+			// DRAFT - cnMatrix is a Cisco-like switch NOS; "show running-config" over SSH is
+			// the expected dump. The paging-disable command below is a best guess - if your
+			// cnMatrix pages output (a "--More--" prompt), adjust the Init command to whatever
+			// it uses. Validate against real gear.
+			Name:        "cambium_cnmatrix",
+			Description: "Cambium cnMatrix switch (Cisco-like CLI) - DRAFT, validate against gear",
+			Init:        []string{"terminal length 0"},
+			Config:      []string{"show running-config"},
+			Strip: []*regexp.Regexp{
+				re(`^Building configuration`),
+				re(`^Current configuration`),
+			},
+		},
+		{
 			Name:        "vyos",
 			Description: "VyOS / Vyatta",
 			Init:        []string{"set terminal length 0"},
