@@ -53,9 +53,12 @@ secret    = "filesecret"
 }
 
 func TestLoadDefaultsWhenNoFile(t *testing.T) {
-	// Point candidates away from any real config.
+	// Point candidates away from any real config (incl. a global one on the build host).
 	t.Setenv("RUSTED_CONFIG", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	orig := GlobalConfigPath
+	GlobalConfigPath = filepath.Join(t.TempDir(), "none.toml")
+	t.Cleanup(func() { GlobalConfigPath = orig })
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatal(err)

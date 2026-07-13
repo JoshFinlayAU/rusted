@@ -57,7 +57,9 @@ func UserConfigPath() string {
 }
 
 // GlobalConfigPath is the system-wide config location.
-const GlobalConfigPath = "/etc/rusted/config.toml"
+// GlobalConfigPath is the system-wide config location. It's a var (not a const) so
+// tests can point it away from a real /etc/rusted/config.toml on the build host.
+var GlobalConfigPath = "/etc/rusted/config.toml"
 
 // Candidates lists the config files to try, in order, when no explicit path is
 // given.
