@@ -15,7 +15,7 @@ func TestCambiumDraftDrivers(t *testing.T) {
 	if d, _ := Get("cambium_epmp"); d.Config[0] != "config show json" {
 		t.Errorf("cambium_epmp config = %q", d.Config[0])
 	}
-	// ePMP JSON export must keep raw normalisation off (don't mask JSON values).
+	// ePMP JSON export must set RawNormalize (skip normalisation, don't mask JSON values).
 	if d, _ := Get("cambium_epmp"); !d.RawNormalize {
 		t.Error("cambium_epmp should set RawNormalize")
 	}
