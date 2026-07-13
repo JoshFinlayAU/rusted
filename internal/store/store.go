@@ -136,7 +136,9 @@ func (s *Store) addColumnIfMissing(table, column, def string) {
 
 // --- Credentials ---
 
-// CreateCredential inserts a new credential, sealing its secret fields.
+// CreateCredential inserts (or updates, keyed on the unique name) a credential, sealing
+// its secret fields. Upsert so a caller that re-syncs the same credential before each
+// backup updates it in place rather than failing on the unique-name constraint.
 func (s *Store) CreateCredential(c *Credential) (int64, error) {
 	pw, err := secret.Seal(c.Password)
 	if err != nil {
@@ -151,7 +153,11 @@ func (s *Store) CreateCredential(c *Credential) (int64, error) {
 		return 0, err
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO credentials (name, username, password, private_key, enable) VALUES (?,?,?,?,?)`,
+		`INSERT INTO credentials (name, username, password, private_key, enable)
+		 VALUES (?,?,?,?,?)
+		 ON CONFLICT(name) DO UPDATE SET
+		   username=excluded.username, password=excluded.password,
+		   private_key=excluded.private_key, enable=excluded.enable`,
 		c.Name, c.Username, pw, pk, en)
 	if err != nil {
 		return 0, err
