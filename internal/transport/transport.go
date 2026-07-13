@@ -1,5 +1,6 @@
 // Package transport defines the pluggable mechanism rusted uses to reach a
-// device and run commands against it. SSH is the only built-in transport, but
+// device and run commands against it. SSH is the default transport (routeros-api also
+// ships for MikroTik's binary API), but
 // additional transports (telnet, serial console servers, REST, NETCONF, ...)
 // can be added by implementing Transport and calling Register.
 //

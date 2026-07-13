@@ -89,7 +89,13 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 		return finish("failed", "device has no credential", "", 0)
 	}
 
-	tr, err := transport.Get(e.Transport)
+	// A device can pin its own transport (e.g. "routeros-api"); otherwise use the
+	// engine default (ssh).
+	transportName := e.Transport
+	if dev.Transport != "" {
+		transportName = dev.Transport
+	}
+	tr, err := transport.Get(transportName)
 	if err != nil {
 		return finish("failed", err.Error(), "", 0)
 	}

@@ -1,7 +1,8 @@
 # Writing a transport module
 
 A **transport** is how rusted reaches a device and exchanges commands with it.
-SSH is built in; everything else (telnet, a serial console server, a REST or
+SSH is the default transport and `routeros-api` (MikroTik binary API) also ships;
+everything else (telnet, a serial console server, a REST or
 NETCONF endpoint, a vendor cloud API) can be added by implementing one small
 interface and registering it.
 

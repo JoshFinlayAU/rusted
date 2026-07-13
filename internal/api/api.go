@@ -147,6 +147,7 @@ type deviceDTO struct {
 	Host       string `json:"host"`
 	Port       int    `json:"port"`
 	Driver     string `json:"driver"`
+	Transport  string `json:"transport"`
 	Credential string `json:"credential"`
 	Group      string `json:"group"`
 	Enabled    bool   `json:"enabled"`
@@ -160,7 +161,7 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]deviceDTO, 0, len(devs))
 	for _, d := range devs {
-		out = append(out, deviceDTO{d.Name, d.Host, d.Port, d.Driver, "", d.Group, d.Enabled})
+		out = append(out, deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, "", d.Group, d.Enabled})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -171,7 +172,7 @@ func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	dto := deviceDTO{d.Name, d.Host, d.Port, d.Driver, "", d.Group, d.Enabled}
+	dto := deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, "", d.Group, d.Enabled}
 	if d.Credential != nil {
 		dto.Credential = d.Credential.Name
 	}
@@ -184,6 +185,7 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		Host       string `json:"host"`
 		Port       int    `json:"port"`
 		Driver     string `json:"driver"`
+		Transport  string `json:"transport"`
 		Credential string `json:"credential"`
 		Group      string `json:"group"`
 		Enabled    *bool  `json:"enabled"`
@@ -206,7 +208,7 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		enabled = *in.Enabled
 	}
 	d := &store.Device{
-		Name: in.Name, Host: in.Host, Port: in.Port, Driver: in.Driver,
+		Name: in.Name, Host: in.Host, Port: in.Port, Driver: in.Driver, Transport: in.Transport,
 		CredentialID: cred.ID, Group: in.Group, Enabled: enabled,
 	}
 	if _, err := s.Store.CreateDevice(d); err != nil {

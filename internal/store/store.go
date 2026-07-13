@@ -37,6 +37,7 @@ type Device struct {
 	Host         string
 	Port         int
 	Driver       string
+	Transport    string // transport name (e.g. "routeros-api"); "" = engine default (ssh)
 	CredentialID int64
 	Group        string // sub-directory within the backup repo
 	Enabled      bool
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS devices (
     host          TEXT NOT NULL,
     port          INTEGER NOT NULL DEFAULT 22,
     driver        TEXT NOT NULL DEFAULT 'generic',
+    transport     TEXT NOT NULL DEFAULT '',
     credential_id INTEGER NOT NULL REFERENCES credentials(id),
     "group"       TEXT NOT NULL DEFAULT '',
     enabled       INTEGER NOT NULL DEFAULT 1
@@ -107,8 +109,29 @@ CREATE TABLE IF NOT EXISTS backup_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_device ON backup_runs(device_id, started_at DESC);
 `
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Additive migrations for databases created before a column existed
+	// (CREATE TABLE IF NOT EXISTS never adds columns to an existing table).
+	s.addColumnIfMissing("devices", "transport", "TEXT NOT NULL DEFAULT ''")
+	return nil
+}
+
+// addColumnIfMissing ALTERs a table to add a column when it isn't already present,
+// so upgrades don't need a full rebuild. Best-effort: a failure here just means an
+// older schema, surfaced by the next query rather than a crash on boot.
+func (s *Store) addColumnIfMissing(table, column, def string) {
+	rows, err := s.db.Query(`SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	if err != nil {
+		return
+	}
+	present := rows.Next()
+	rows.Close()
+	if present {
+		return
+	}
+	_, _ = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + def)
 }
 
 // --- Credentials ---
@@ -212,20 +235,27 @@ func (s *Store) CreateDevice(d *Device) (int64, error) {
 	if d.Driver == "" {
 		d.Driver = "generic"
 	}
+	// Upsert on the unique name so a re-register (the caller syncs state before every
+	// backup) updates host/driver/transport/credential/enabled instead of failing.
 	res, err := s.db.Exec(
-		`INSERT INTO devices (name, host, port, driver, credential_id, "group", enabled) VALUES (?,?,?,?,?,?,?)`,
-		d.Name, d.Host, d.Port, d.Driver, d.CredentialID, d.Group, d.Enabled)
+		`INSERT INTO devices (name, host, port, driver, transport, credential_id, "group", enabled)
+		 VALUES (?,?,?,?,?,?,?,?)
+		 ON CONFLICT(name) DO UPDATE SET
+		   host=excluded.host, port=excluded.port, driver=excluded.driver,
+		   transport=excluded.transport, credential_id=excluded.credential_id,
+		   "group"=excluded."group", enabled=excluded.enabled`,
+		d.Name, d.Host, d.Port, d.Driver, d.Transport, d.CredentialID, d.Group, d.Enabled)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-const deviceCols = `d.id, d.name, d.host, d.port, d.driver, d.credential_id, d."group", d.enabled`
+const deviceCols = `d.id, d.name, d.host, d.port, d.driver, d.transport, d.credential_id, d."group", d.enabled`
 
 func scanDevice(row interface{ Scan(...any) error }) (*Device, error) {
 	var d Device
-	if err := row.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.CredentialID, &d.Group, &d.Enabled); err != nil {
+	if err := row.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CredentialID, &d.Group, &d.Enabled); err != nil {
 		return nil, err
 	}
 	return &d, nil

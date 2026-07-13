@@ -51,10 +51,16 @@ project spec are:
 |---------------------|------------------------|---------------------------|
 | `cisco_nxos`        | Cisco Nexus (NX-OS)    | `show running-config`     |
 | `mikrotik_routeros` | MikroTik RouterOS v7+  | `/export terse`           |
+| `mikrotik_routeros_api` | MikroTik RouterOS v7+ over the binary API | `/export` |
 | `juniper_junos`     | Juniper Junos          | `show configuration | display set` |
 
 Additional drivers (`cisco_ios`, `cisco_asa`, `arista_eos`, `fortinet`,
 `vyos`, `generic`) ship as well.
+
+`mikrotik_routeros_api` is for devices with SSH disabled but the API enabled: pair it
+with the `routeros-api` transport (set the device's `transport` to `routeros-api`, port
+8728, or 8729 for API-SSL). It runs `/export` as an API sentence - a RouterOS 7 behaviour,
+so validate it against your gear.
 
 ## Example
 
