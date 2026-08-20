@@ -44,39 +44,79 @@ bearer token stays in the LibreNMS `.env` and is never sent to the browser.
 
 ## Install
 
-rusted's API must be running first. It can listen on loopback only, since just
+`rusted`'s API must be running first. It can listen on loopback only, since just
 the LibreNMS server needs to reach it:
 
 ```sh
 rusted serve --addr 127.0.0.1:8080   # token comes from rusted's config file
-```
-
-Then, on the LibreNMS host, install the plugin as a Composer package. From the
-LibreNMS install directory (usually `/opt/librenms`):
-
-```sh
-# Option A — from a published/VCS Composer package
+Then, on the LibreNMS host (install dir is usually /opt/librenms), install the
+plugin. Two options are available.
+Option A — from a published/VCS Composer package
 ./lnms plugin:add athena-networks/rusted-librenms
-
-# Option B — local path package (development / air-gapped)
-# Add a path repository pointing at this directory to LibreNMS composer.json,
-# then: composer require athena-networks/rusted-librenms:@dev
-```
-
-Add the connection settings to the LibreNMS `.env`:
-
-```ini
+Option B — local path package (development / air-gapped)
+This is the recommended approach when the plugin source lives on disk on the
+LibreNMS server (e.g. /opt/rusted-plugin/librenms-module, the directory that
+contains the plugin's own composer.json).
+1. Point a Composer path repository at the plugin directory. Add a
+repositories entry to the LibreNMS composer.json. The path must be
+absolute and readable by the librenms user:
+jq '.repositories = [{"type":"path","path":"/<rusted_main_source_directory>/librenms-module"}]' \
+    composer.json > composer.json.tmp && mv composer.json.tmp composer.json
+Or, by hand:
+"repositories": [
+    { "type": "path", "path": "/<rusted_main_source_directory>/librenms-module/" }
+]
+Schema note: the directory must end at the folder that holds the
+plugin's composer.json (i.e. the librenms-module folder, not its
+parent).
+2. Install the package. Always pass a version constraint; a path repository
+without a VCS tag is published as dev-main/dev-master, which @dev
+matches:
+sudo -u librenms ./lnms plugin:add athena-networks/rusted-librenms @dev
+./lnms plugin:add invokes LibreNMS's bundled Composer wrapper internally, so
+the composer binary does not need to be on PATH.
+3. Enable the plugin. The plugin registers itself under the name rusted
+(see RustedServiceProvider::PLUGIN), so:
+sudo -u librenms ./lnms plugin:enable rusted
+(If the package was just installed via plugin:add, it is already registered
+in composer.plugins.json and may print "Plugin already enabled" — that is
+fine.)
+4. Clear caches so the new routes, views and config take effect:
+sudo -u librenms ./lnms config:clear
+sudo -u librenms php artisan view:clear
+sudo -u librenms php artisan route:clear
+Add the connection settings to the LibreNMS .env:
 RUSTED_API_URL=http://127.0.0.1:8080
 RUSTED_API_TOKEN=a-long-random-token
-```
-
-Enable the plugin in LibreNMS under **Settings → Plugins** (or
-`./lnms plugin:enable rusted`), then clear caches:
-
-```sh
-./lnms config:clear
-php artisan view:clear
-```
+Open Rusted Backups from the main menu.
+Verifying the install
+There is no lnms plugin:list command. To confirm the plugin is registered and
+enabled, query the database directly:
+sudo -u librenms php lnms db:query \
+  "SELECT plugin_name, plugin_active, version FROM plugins WHERE plugin_name LIKE 'rusted%';"
+plugin_active should be 1. If the provider discovery step ran, the
+RustedServiceProvider will also appear in ./lnms package:discover output.
+Troubleshooting
+The property url is required / type does not have a value in the enumeration ["path"]
+Some Composer builds ship a stricter JSON schema for path repositories that
+expects the property $url instead of $path. If composer validate or
+lnms plugin:add fails with:
+repositories[0].url : The property url is required
+repositories[0].type : Does not have a value in the enumeration ["path"]
+swap the property name from path to url:
+jq '.repositories = [{"type":"path","url":"/<rusted_main_source_directory>/librenms-module"}]' \
+    composer.json > composer.json.tmp && mv composer.json.tmp composer.json
+i.e. the entry becomes {"type": "path", "url": "/<rusted_main_source_directory>/librenms-module"}.
+Both forms behave identically for path repositories (Composer symlinks the
+directory); only the property name differs by schema version.
+composer: command not found
+Use ./lnms plugin:add ... (above) instead of invoking composer directly —
+lnms always uses LibreNMS's bundled composer.phar via
+scripts/composer_wrapper.php, so no global Composer install is required.
+Permission denied on the plugin path
+The librenms system user must be able to read (and stat) every directory in
+the path to the plugin, e.g. chmod o+x /opt and chmod -R o+rX
+/opt/rusted-plugin.
 
 Open **Rusted Backups** from the main menu.
 
