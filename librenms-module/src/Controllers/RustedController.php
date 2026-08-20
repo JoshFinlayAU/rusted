@@ -6,6 +6,7 @@ use AthenaNetworks\RustedLibrenms\Support\RustedClient;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 
 class RustedController extends Controller
@@ -84,6 +85,78 @@ class RustedController extends Controller
     public function apiHistory(string $name): JsonResponse
     {
         return $this->proxy(fn () => RustedClient::client()->get('/api/devices/'.rawurlencode($name).'/history'));
+    }
+
+    /**
+     * Fetch a device's stored configuration, optionally at a given git commit.
+     * Forwards the optional ?commit=<hash> query parameter to rusted and returns
+     * the raw text/plain body (never JSON-encoded).
+     */
+    public function apiConfig(string $name, Request $request): Response
+    {
+        return $this->proxyText(function () use ($name, $request) {
+            $uri = '/api/devices/'.rawurlencode($name).'/config';
+            if ($commit = $request->query('commit')) {
+                $uri .= '?commit='.rawurlencode($commit);
+            }
+
+            return RustedClient::client()->get($uri);
+        });
+    }
+
+    /** List the git revisions of a device's config (newest first). JSON. */
+    public function apiVersions(string $name): JsonResponse
+    {
+        return $this->proxy(fn () => RustedClient::client()->get('/api/devices/'.rawurlencode($name).'/versions'));
+    }
+
+    /**
+     * Diff two revisions (or a single revision against its parent / HEAD).
+     * Forwards ?from=<hash>&to=<hash> to rusted and returns the unified diff as
+     * raw text/plain.
+     */
+    public function apiDiff(string $name, Request $request): Response
+    {
+        return $this->proxyText(function () use ($name, $request) {
+            $uri = '/api/devices/'.rawurlencode($name).'/diff';
+            $qs = [];
+            foreach (['from', 'to'] as $key) {
+                if ($value = $request->query($key)) {
+                    $qs[] = rawurlencode($key).'='.rawurlencode($value);
+                }
+            }
+            if ($qs) {
+                $uri .= '?'.implode('&', $qs);
+            }
+
+            return RustedClient::client()->get($uri);
+        });
+    }
+
+    /** Render the per-device configuration viewer page. */
+    public function device(string $name): View
+    {
+        return view('rusted::device', ['hostname' => $name]);
+    }
+
+    /**
+     * Execute a rusted API call that returns a text body and forward its raw body
+     * and status, preserving the content type. Turns any transport failure into a
+     * clean 502 so the browser always gets a text response.
+     *
+     * @param  callable(): \Illuminate\Http\Client\Response  $call
+     */
+    private function proxyText(callable $call): Response
+    {
+        try {
+            $resp = $call();
+        } catch (\Throwable $e) {
+            return response('Could not reach the rusted API: '.$e->getMessage(), 502)
+                ->header('Content-Type', 'text/plain; charset=utf-8');
+        }
+
+        return response($resp->body(), $resp->status() ?: 502)
+            ->header('Content-Type', $resp->header('Content-Type') ?: 'text/plain; charset=utf-8');
     }
 
     /**

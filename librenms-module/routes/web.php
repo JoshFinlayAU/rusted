@@ -7,6 +7,10 @@ Route::middleware(['web', 'auth'])->prefix('plugin/rusted')->name('rusted.')->gr
     // The page (HTML shell).
     Route::get('/', [RustedController::class, 'index'])->name('index');
 
+    // A per-device detail page: view the latest config, browse revisions, and
+    // diff two revisions.
+    Route::get('/device/{name}', [RustedController::class, 'device'])->name('device.show');
+
     // Same-origin AJAX/JSON receiver. The browser posts here; the controller
     // relays to the rusted API. No reverse proxy required.
     Route::prefix('api')->name('api.')->group(function (): void {
@@ -22,5 +26,12 @@ Route::middleware(['web', 'auth'])->prefix('plugin/rusted')->name('rusted.')->gr
         Route::delete('devices/{name}', [RustedController::class, 'apiRemoveDevice'])->name('devices.remove');
         Route::post('devices/{name}/backup', [RustedController::class, 'apiBackup'])->name('devices.backup');
         Route::get('devices/{name}/history', [RustedController::class, 'apiHistory'])->name('devices.history');
+
+        // Configuration retrieval, revision listing and diffing. These return
+        // text/plain bodies, so they are relayed via proxyText() rather than
+        // proxy(), to avoid corrupting the raw config/diff payload.
+        Route::get('devices/{name}/config', [RustedController::class, 'apiConfig'])->name('devices.config');
+        Route::get('devices/{name}/versions', [RustedController::class, 'apiVersions'])->name('devices.versions');
+        Route::get('devices/{name}/diff', [RustedController::class, 'apiDiff'])->name('devices.diff');
     });
 });

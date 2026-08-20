@@ -87,7 +87,11 @@
             '<tr><th style="width:120px">Driver</th><td>' + esc(device.driver) + '</td></tr>' +
             '<tr><th>Last backup</th><td>' + lastHtml + '</td></tr>' +
             '</table>' +
-            '<button class="btn btn-xs btn-primary" id="rusted-do-backup"><i class="fa fa-download"></i> Back up now</button>';
+            '<div style="margin-bottom:8px">' +
+            '<a href="' + @json($configUrl) + '" class="btn btn-xs btn-default" id="rusted-do-config">' +
+            '<i class="fa fa-eye"></i> View configuration</a> ' +
+            '<button class="btn btn-xs btn-primary" id="rusted-do-backup"><i class="fa fa-download"></i> Back up now</button>' +
+            '</div>';
 
         document.getElementById('rusted-do-backup').addEventListener('click', doBackup);
     }

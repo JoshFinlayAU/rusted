@@ -12,10 +12,15 @@ the `rusted serve` HTTP API.
   they are sent once to rusted, encrypted at rest, and never returned to the
   browser.
 - **View backup history** per device (status, timestamps, commit, detail).
+- **Browse and view stored configurations**, with a **revision history** (git log)
+  per device — pick any revision and read it back.
+- **Compare two revisions** of a device's config with an inline unified-diff
+  viewer (or view what a single revision changed over its parent).
 - **Trigger a backup on demand** with inline success/failure feedback.
 - A **Configuration Backups panel on every device's Overview page** showing the
-  last backup, a "Back up now" button, and a one-click "Add to rusted" when the
-  device isn't managed yet (matched on hostname).
+  last backup, a "Back up now" button, and a one-click "View configuration" link
+  (matched on hostname), plus a one-click "Add to rusted" when the device isn't
+  managed yet.
 - A **settings page** showing API connectivity status.
 
 ## Architecture — no reverse proxy needed
@@ -186,13 +191,14 @@ src/Support/RustedClient.php      server-side HTTP client for the rusted API
 src/Hooks/MenuEntry.php           menu hook
 src/Hooks/Settings.php            settings hook
 src/Hooks/DeviceOverview.php      per-device Overview-page panel hook
-src/Controllers/RustedController.php  page shell + JSON AJAX receiver
-resources/views/                  menu, page, device-overview, settings (Blade)
+src/Controllers/RustedController.php  page + device viewer shell + JSON/AJAX receiver
+resources/views/                  menu, page, device, device-overview, settings (Blade)
 ```
 
 ## Routes
 
-The page is `GET plugin/rusted`. The browser's AJAX calls hit the same-origin
+The page is `GET plugin/rusted`. A per-device configuration viewer lives at
+`GET plugin/rusted/device/{name}`. The browser's AJAX calls hit the same-origin
 receiver (all `web`+`auth`+CSRF protected):
 
 | Method & path | Relays to rusted |
@@ -203,13 +209,20 @@ receiver (all `web`+`auth`+CSRF protected):
 | `DELETE plugin/rusted/api/devices/{name}` | `DELETE /api/devices/{name}` |
 | `POST plugin/rusted/api/devices/{name}/backup` | `POST /api/devices/{name}/backup` |
 | `GET plugin/rusted/api/devices/{name}/history` | `GET /api/devices/{name}/history` |
+| `GET plugin/rusted/api/devices/{name}/versions` | `GET /api/devices/{name}/versions` (revision list) |
+| `GET plugin/rusted/api/devices/{name}/config?commit=<hash>` | `GET /api/devices/{name}/config` — latest, or `?commit=` for a revision (**text/plain**) |
+| `GET plugin/rusted/api/devices/{name}/diff?from=<a>&to=<b>` | `GET /api/devices/{name}/diff` — unified diff (`from` alone = that revision's change; `from`+`to` = between two) (**text/plain**) |
 | `GET plugin/rusted/api/credentials` | `GET /api/credentials` |
 | `POST plugin/rusted/api/credentials` | `POST /api/credentials` |
 | `DELETE plugin/rusted/api/credentials/{name}` | `DELETE /api/credentials/{name}` |
 | `GET plugin/rusted/api/drivers` | `GET /api/drivers` |
 
-The receiver forwards rusted's JSON body and HTTP status, and turns any
-connection failure into a clean `502` so the UI always gets JSON.
+The JSON receiver forwards rusted's JSON body and HTTP status, and turns any
+transport failure into a clean `502` so the UI always gets JSON.
+
+The `config` and `diff` receivers are relayed verbatim as **`text/plain`** (the
+raw config / unified diff payload) and turn any transport failure into a clean
+`502` text response, so the browser never receives JSON-wrapped text.
 
 > Note: credentials are intentionally **not** managed from the web UI. Manage
 > them with the `rusted cred` CLI and reference them by name when adding a
