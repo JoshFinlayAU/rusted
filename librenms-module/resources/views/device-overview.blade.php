@@ -54,6 +54,7 @@
     }
 
     const dev = encodeURIComponent(RUSTED.host);
+    let currentDevice = null;
 
     async function render() {
         $body.innerHTML = '<em>Loading&hellip;</em>';
@@ -71,6 +72,7 @@
     }
 
     async function renderManaged(device) {
+        currentDevice = device;
         const h = await api('GET', '/devices/' + dev + '/history');
         const runs = (h.ok && Array.isArray(h.data)) ? h.data : [];
         const last = runs[0];
@@ -82,18 +84,29 @@
                 (last.commit ? ' <code>' + esc(String(last.commit).substring(0, 8)) + '</code>' : '');
         }
 
+        const isEnabled = (device.enabled !== false);
+        const toggleIcon = 'fa-power-off';
+        const toggleClass = isEnabled ? 'btn-success' : 'btn-danger';
+        const toggleTitle = isEnabled
+            ? 'Enabled &mdash; click to disable (stops backups, keeps history)'
+            : 'Disabled &mdash; click to enable (resumes backups)';
+
         $body.innerHTML =
             '<table class="table table-condensed" style="margin-bottom:8px">' +
             '<tr><th style="width:120px">Driver</th><td>' + esc(device.driver) + '</td></tr>' +
             '<tr><th>Last backup</th><td>' + lastHtml + '</td></tr>' +
             '</table>' +
-            '<div style="margin-bottom:8px">' +
-            '<a href="' + @json($configUrl) + '" class="btn btn-xs btn-default" id="rusted-do-config">' +
-            '<i class="fa fa-eye"></i> View configuration</a> ' +
-            '<button class="btn btn-xs btn-primary" id="rusted-do-backup"><i class="fa fa-download"></i> Back up now</button>' +
+            '<div class="btn-group btn-group-xs" role="group">' +
+            '<button class="btn btn-xs ' + toggleClass + '" id="rusted-do-toggle" title="' + toggleTitle + '"><i class="fa ' + toggleIcon + '"></i></button>' +
+            '<button class="btn btn-xs btn-default" id="rusted-do-backup" title="Back up now (error shown if it fails)"><i class="fa fa-download"></i></button>' +
+            '<button class="btn btn-xs btn-default" id="rusted-do-history" title="Show history / view configuration"><i class="fa fa-clock-o"></i></button>' +
+            '<button class="btn btn-xs btn-danger" id="rusted-do-remove" title="Delete from rusted (downloads the full configuration history first)"><i class="fa fa-trash-o"></i></button>' +
             '</div>';
 
         document.getElementById('rusted-do-backup').addEventListener('click', doBackup);
+        document.getElementById('rusted-do-history').addEventListener('click', () => window.location.href = @json($configUrl));
+        document.getElementById('rusted-do-toggle').addEventListener('click', doToggle);
+        document.getElementById('rusted-do-remove').addEventListener('click', doRemove);
     }
 
     async function doBackup(e) {
@@ -106,6 +119,72 @@
         btn.innerHTML = original;
         if (!r.ok) {
             alert('Backup failed: ' + ((r.data && r.data.error) || ('HTTP ' + r.status)));
+        }
+        render();
+    }
+
+    // Fetch a binary response (the history zip) as a Blob and trigger a download
+    // without navigating away from the page, so removal can follow it server-side.
+    async function downloadBlob(path, filename) {
+        const res = await fetch(RUSTED.base + path, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'application/zip',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRF-TOKEN': RUSTED.csrf,
+            },
+        });
+        if (!res.ok) {
+            throw new Error('HTTP ' + res.status);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 1000);
+    }
+
+    // Enable / disable (never delete) — a soft toggle that preserves the device's
+    // configuration history in rusted. Mirrors the button's "isEnabled" rule so
+    // a device with no explicit flag (treated as enabled) toggles to disabled.
+    async function doToggle() {
+        if (!currentDevice) return;
+        const isNowEnabled = (currentDevice.enabled !== false);
+        const r = await api('POST', '/devices/' + dev + '/enabled', { enabled: !isNowEnabled });
+        if (!r.ok) {
+            alert('Toggle failed: ' + ((r.data && (r.data.error || r.data.message)) || ('HTTP ' + r.status)));
+            return;
+        }
+        render();
+    }
+
+    // Remove = a real delete from rusted. Since this erases the device, a full
+    // archive of every configuration revision is downloaded first (so it can be
+    // re-imported later if needed) before the device is deleted.
+    async function doRemove() {
+        if (!currentDevice) return;
+        if (!confirm('Download a backup of all configurations and DELETE this device from rusted?\n\n' +
+            'This stops backups permanently and removes the device from rusted. ' +
+            'Its configuration archive will be saved first.')) return;
+
+        const filename = 'rusted-history-' + RUSTED.host + '.zip';
+        try {
+            await downloadBlob('/devices/' + dev + '/history/zip', filename);
+        } catch (e) {
+            alert('Could not download the configuration archive: ' + e.message +
+                '\n\nThe device was NOT deleted. Fix this and try again, or use the rusted CLI.');
+            return;
+        }
+
+        const r = await api('DELETE', '/devices/' + dev);
+        if (!r.ok) {
+            alert('Delete failed: ' + ((r.data && (r.data.error || r.data.message)) || ('HTTP ' + r.status)) +
+                '\n\nThe archive was saved, but the device could not be removed.');
+            return;
         }
         render();
     }

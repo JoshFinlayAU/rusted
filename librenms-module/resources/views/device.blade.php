@@ -19,6 +19,7 @@
             <strong>Latest configuration</strong>
             <span class="pull-right">
                 <button id="rusted-config-refresh" class="btn btn-xs btn-default"><i class="fa fa-refresh"></i></button>
+                <a id="rusted-config-history" class="btn btn-xs btn-default" title="Download all config revisions as a zip" href="#"><i class="fa fa-download"></i> All revisions</a>
                 <button id="rusted-config-download" class="btn btn-xs btn-default"><i class="fa fa-download"></i> Raw</button>
             </span>
         </div>
@@ -243,6 +244,10 @@
     // "Back up now"
     document.getElementById('rusted-config-refresh').addEventListener('click', () => loadConfig());
     document.getElementById('rusted-config-download').addEventListener('click', () => downloadConfig($config.textContent));
+    document.getElementById('rusted-config-history').addEventListener('click', e => {
+        e.preventDefault();
+        window.location.href = RUSTED.base + '/devices/' + host + '/history/zip';
+    });
 
     document.getElementById('rusted-versions-refresh').addEventListener('click', loadVersions);
 

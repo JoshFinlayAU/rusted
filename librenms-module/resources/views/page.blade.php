@@ -34,22 +34,7 @@
         </div>
     </div>
 
-    <div id="rusted-history-panel" class="panel panel-info" style="display:none">
-        <div class="panel-heading">
-            <strong>Backup history: <span id="rusted-history-device"></span></strong>
-            <button id="rusted-history-close" class="btn btn-xs btn-default pull-right" type="button">close</button>
-        </div>
-        <div class="panel-body">
-            <table class="table table-condensed table-striped">
-                <thead>
-                    <tr><th>Started</th><th>Status</th><th>Bytes</th><th>Commit</th><th>Detail</th></tr>
-                </thead>
-                <tbody id="rusted-history"></tbody>
-            </table>
-        </div>
-    </div>
-
-    <div class="panel panel-default">
+     <div class="panel panel-default">
         <div class="panel-heading"><strong>Add device</strong></div>
         <div class="panel-body">
             <form id="rusted-add" class="form-inline">
@@ -102,14 +87,15 @@
         base: @json(url('plugin/rusted/api')),
         csrf: @json(csrf_token()),
     };
+    // Root of the per-device viewer (plugin/rusted/device/{name}) — the "show
+    // history / view configuration" destination, shared with the device
+    // Overview panel.
+    const DEVICE_VIEW = @json(url('plugin/rusted/device'));
 
     const $devices = document.getElementById('rusted-devices');
     const $alerts = document.getElementById('rusted-alerts');
     const $driver = document.getElementById('rusted-driver');
     const $form = document.getElementById('rusted-add');
-    const $historyPanel = document.getElementById('rusted-history-panel');
-    const $history = document.getElementById('rusted-history');
-    const $historyDevice = document.getElementById('rusted-history-device');
     const $credentials = document.getElementById('rusted-credentials');
     const $credForm = document.getElementById('rusted-cred-add');
     const $credential = document.getElementById('rusted-credential');
@@ -159,26 +145,34 @@
         return '<span class="label label-' + kind + '">' + esc(text) + '</span>';
     }
 
+    // Each device row carries the SAME four icon buttons as the per-device
+    // Overview panel (Enabled toggle, Back up, Show history, Remove), wired to
+    // the same actions.
     function renderDevices(devices) {
         if (!devices || !devices.length) {
             $devices.innerHTML = '<tr><td colspan="7"><em>No devices yet.</em></td></tr>';
             return;
         }
         $devices.innerHTML = devices.map(function (d) {
-            const enabled = d.enabled ? label('yes', 'success') : label('no', 'default');
             const n = esc(d.name);
+            const isEnabled = (d.enabled !== false);
+            const toggleClass = isEnabled ? 'btn-success' : 'btn-danger';
+            const toggleTitle = isEnabled
+                ? 'Enabled \u2014 click to disable (stops backups, keeps history)'
+                : 'Disabled \u2014 click to enable (resumes backups)';
             return '<tr>' +
                 '<td>' + esc(d.name) + '</td>' +
                 '<td>' + esc(d.host) + '</td>' +
                 '<td>' + esc(d.port) + '</td>' +
                 '<td>' + esc(d.driver) + '</td>' +
                 '<td>' + (d.group ? esc(d.group) : '-') + '</td>' +
-                '<td>' + enabled + '</td>' +
-                '<td>' +
-                    '<button class="btn btn-xs btn-primary" data-action="backup" data-name="' + n + '"><i class="fa fa-download"></i> Backup</button> ' +
-                    '<button class="btn btn-xs btn-default" data-action="history" data-name="' + n + '"><i class="fa fa-history"></i> History</button> ' +
-                    '<button class="btn btn-xs btn-danger" data-action="remove" data-name="' + n + '"><i class="fa fa-trash"></i> Remove</button>' +
-                '</td>' +
+                '<td>' + label(d.enabled ? 'yes' : 'no', d.enabled ? 'success' : 'default') + '</td>' +
+                '<td><div class="btn-group btn-group-xs" role="group">' +
+                    '<button class="btn btn-xs ' + toggleClass + '" data-action="toggle" data-name="' + n + '" title="' + toggleTitle + '"><i class="fa fa-power-off"></i></button>' +
+                    '<button class="btn btn-xs btn-default" data-action="backup" data-name="' + n + '" title="Back up now"><i class="fa fa-download"></i></button>' +
+                    '<button class="btn btn-xs btn-default" data-action="history" data-name="' + n + '" title="Show history / view configuration"><i class="fa fa-clock-o"></i></button>' +
+                    '<button class="btn btn-xs btn-danger" data-action="remove" data-name="' + n + '" title="Delete (downloads the full config history as a zip first)"><i class="fa fa-trash-o"></i></button>' +
+                '</div></td>' +
             '</tr>';
         }).join('');
     }
@@ -260,53 +254,85 @@
         }
     }
 
-    async function doRemove(name) {
-        if (!confirm('Remove ' + name + '?')) return;
+    // Fetch a binary blob (the history zip) and trigger a download without
+    // navigating away, so removal can follow it server-side. Identical to the
+    // helper used by the per-device Overview panel.
+    async function downloadBlob(path, filename) {
+        const res = await fetch(RUSTED.base + path, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'application/zip',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRF-TOKEN': RUSTED.csrf,
+            },
+        });
+        if (!res.ok) {
+            throw new Error('HTTP ' + res.status);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 1000);
+    }
+
+    // Enable / disable (never delete) — a soft toggle that preserves the device's
+    // configuration history in rusted. Same action as the Overview panel.
+    async function doToggle(name, btn) {
+        const isNowEnabled = btn.classList.contains('btn-success');
         try {
-            await api('DELETE', '/devices/' + encodeURIComponent(name));
-            alertBox('success', 'Device ' + name + ' removed.');
+            await api('POST', '/devices/' + encodeURIComponent(name) + '/enabled', { enabled: !isNowEnabled });
+            alertBox('success', name + ' is now ' + (isNowEnabled ? 'disabled' : 'enabled') + '.');
             loadDevices();
         } catch (e) {
-            alertBox('danger', 'Remove failed: ' + e.message);
+            alertBox('danger', 'Toggle failed: ' + e.message);
         }
     }
 
-    async function showHistory(name) {
-        $historyDevice.textContent = name;
-        $history.innerHTML = '<tr><td colspan="5"><em>Loading&hellip;</em></td></tr>';
-        $historyPanel.style.display = '';
+    // Remove = a real delete from rusted. Since this erases the device, a full
+    // archive of every configuration revision is downloaded first (so it can be
+    // re-imported later if needed) before the device is deleted. Mirrors the
+    // Overview panel: the delete is skipped if the archive download fails.
+    async function doRemove(name) {
+        if (!confirm('Download a backup of all configurations and DELETE ' + name +
+            ' from rusted?\n\nThis stops backups permanently and removes the device. ' +
+            'Its configuration archive will be saved first; the device is only deleted ' +
+            'if the download succeeds.')) return;
+
+        const filename = 'rusted-history-' + name + '.zip';
         try {
-            const runs = await api('GET', '/devices/' + encodeURIComponent(name) + '/history');
-            if (!runs || !runs.length) {
-                $history.innerHTML = '<tr><td colspan="5"><em>No backup runs recorded.</em></td></tr>';
-                return;
-            }
-            $history.innerHTML = runs.map(function (r) {
-                const s = r.status || '';
-                const kind = s === 'success' ? 'success' : (s === 'failed' ? 'danger' : 'default');
-                const commit = (r.commit || '').substring(0, 8);
-                return '<tr>' +
-                    '<td>' + esc(r.started_at) + '</td>' +
-                    '<td>' + label(s, kind) + '</td>' +
-                    '<td>' + esc(r.bytes || 0) + '</td>' +
-                    '<td><code>' + esc(commit) + '</code></td>' +
-                    '<td>' + esc(r.message) + '</td>' +
-                '</tr>';
-            }).join('');
+            await downloadBlob('/devices/' + encodeURIComponent(name) + '/history/zip', filename);
         } catch (e) {
-            $history.innerHTML = '<tr><td colspan="5"><em>Could not load history.</em></td></tr>';
-            alertBox('warning', e.message);
+            alertBox('danger', 'Could not download the configuration archive: ' + e.message +
+                '\n\nThe device was NOT deleted. Fix this and try again, or use the rusted CLI.');
+            return;
+        }
+
+        try {
+            await api('DELETE', '/devices/' + encodeURIComponent(name));
+            alertBox('success', name + ' deleted from rusted (configuration archive saved).');
+            loadDevices();
+        } catch (e) {
+            alertBox('danger', 'Delete failed: ' + e.message +
+                '\n\nThe archive was saved, but the device could not be removed.');
         }
     }
 
-    // Event delegation for per-row action buttons.
+    // Event delegation for per-row action buttons. All four icons behave
+    // exactly like the per-device Overview panel controls.
     $devices.addEventListener('click', function (e) {
         const btn = e.target.closest('button[data-action]');
         if (!btn) return;
         const name = btn.getAttribute('data-name');
-        if (btn.dataset.action === 'backup') doBackup(name, btn);
-        else if (btn.dataset.action === 'remove') doRemove(name);
-        else if (btn.dataset.action === 'history') showHistory(name);
+        const action = btn.dataset.action;
+        if (action === 'toggle') doToggle(name, btn);
+        else if (action === 'backup') doBackup(name, btn);
+        else if (action === 'history') window.location.href = DEVICE_VIEW + '/' + encodeURIComponent(name);
+        else if (action === 'remove') doRemove(name);
     });
 
     // Event delegation for credential remove buttons.
@@ -349,9 +375,6 @@
     document.getElementById('rusted-refresh').addEventListener('click', function () {
         loadDevices();
         loadCredentials();
-    });
-    document.getElementById('rusted-history-close').addEventListener('click', function () {
-        $historyPanel.style.display = 'none';
     });
 
     $form.addEventListener('submit', async function (e) {

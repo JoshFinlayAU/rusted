@@ -79,6 +79,51 @@ class RustedController extends Controller
         return $this->proxy(fn () => RustedClient::client()->delete('/api/devices/'.rawurlencode($name)));
     }
 
+    /**
+     * Flip a device's `enabled` flag (enable/disable). The device is never
+     * deleted: disabling stops backups while preserving its configuration
+     * history; enabling resumes them. All identity/group/transport/credential
+     * fields are preserved — only `enabled` is changed, via a rusted upsert.
+     *
+     * Body: {"enabled": true|false}
+     */
+    public function apiSetEnabled(string $name, Request $request): JsonResponse
+    {
+        $enabled = $request->validate([
+            'enabled' => 'required|boolean',
+        ])['enabled'];
+
+        try {
+            $g = RustedClient::client()->get('/api/devices/'.rawurlencode($name));
+        } catch (\Throwable $e) {
+            return response()->json(['error' => 'Could not reach the rusted API: '.$e->getMessage()], 502);
+        }
+
+        if (! $g->successful()) {
+            return response()->json($g->json() ?? ['error' => 'HTTP '.$g->status()], $g->status() ?: 502);
+        }
+
+        $e = $g->json();
+        $payload = [
+            'name'       => $e['name'] ?? $name,
+            'host'       => $e['host'] ?? $name,
+            'port'       => $e['port'] ?? 0,
+            'driver'     => $e['driver'] ?? '',
+            'transport'  => $e['transport'] ?? '',
+            'credential' => $e['credential'] ?? '',
+            'group'      => $e['group'] ?? '',
+            'enabled'    => $enabled,
+        ];
+
+        try {
+            $r = RustedClient::client()->post('/api/devices', $payload);
+        } catch (\Throwable $ex) {
+            return response()->json(['error' => 'Could not reach the rusted API: '.$ex->getMessage()], 502);
+        }
+
+        return $this->proxy(fn () => $r);
+    }
+
     public function apiBackup(string $name): JsonResponse
     {
         return $this->proxy(fn () => RustedClient::client()->post('/api/devices/'.rawurlencode($name).'/backup'));
@@ -162,12 +207,45 @@ class RustedController extends Controller
     }
 
     /**
+     * Execute a rusted API call and forward its JSON + status, turning any
+     * transport failure into a clean 502 so the browser always gets JSON.
+     *
+     * @param  callable(): \Illuminate\Http\Client\Response  $call
+     */
+    private function proxy(callable $call): JsonResponse
+    {
+        try {
+            $resp = $call();
+        } catch (\Throwable $e) {
+            return response()->json(
+                ['error' => 'Could not reach the rusted API: '.$e->getMessage()],
+                502
+            );
+        }
+
+        $body = $resp->json();
+        if (! is_array($body)) {
+            $body = ['raw' => $resp->body()];
+        }
+
+        return response()->json($body, $resp->status() ?: 502);
+    }
+
+    /** Render the bulk-sync page shell. */
+    public function sync(): View
+    {
+        return view('rusted::sync');
+    }
+
+    /**
      * Compute the two-pane sync state by joining LibreNMS devices against the
      * rusted device inventory (matched on LibreNMS hostname == rusted device
      * name, case-insensitively):
-     *  - left:  LibreNMS devices not yet in rusted (candidates to add)
-     *  - right: rusted devices that are also in LibreNMS (selectable to remove)
-     *  - grey:  rusted devices that are NOT in LibreNMS (shown greyed, locked)
+     *  - left:  LibreNMS devices not actively backed up by rusted (not in rusted,
+     *           or disabled in rusted). `rust_state` tells them apart.
+     *  - right: rusted devices that are enabled AND also in LibreNMS (selectable
+     *           to disable / remove).
+     *  - grey:  rusted devices that are NOT in LibreNMS (shown greyed, locked).
      */
     public function syncState(): JsonResponse
     {
@@ -188,14 +266,6 @@ class RustedController extends Controller
 
         $rusted = is_array($resp->json()) ? $resp->json() : [];
 
-        // rusted device names (lower-cased) for set membership tests.
-        $rustNames = [];
-        foreach ($rusted as $r) {
-            if (! empty($r['name'])) {
-                $rustNames[strtolower($r['name'])] = true;
-            }
-        }
-
         // In-memory set of LibreNMS hostnames for O(1) membership tests.
         $libreNames = [];
         foreach ($libre as $d) {
@@ -204,13 +274,41 @@ class RustedController extends Controller
             }
         }
 
-        $left = [];   // LibreNMS devices not yet in rusted (candidates to add)
-        $right = [];  // rusted devices also in LibreNMS (selectable to remove)
-        $grey = [];   // rusted devices NOT in LibreNMS (shown greyed, locked)
+        // Partitions of the rusted name set.
+        $enabledRusted = [];   // enabled rusted devices (in rusted + LibreNMS => "right")
+        $disabledRusted = [];  // disabled rusted devices (in rusted + LibreNMS => still "left")
+        $right = [];
+        $grey = [];
 
+        foreach ($rusted as $r) {
+            if (empty($r['name'])) {
+                continue;
+            }
+            $low = strtolower($r['name']);
+            $entry = [
+                'name'    => $r['name'],
+                'host'    => $r['host'] ?? $r['name'],
+                'driver'  => $r['driver'] ?? '',
+                'group'   => $r['group'] ?? '',
+                'enabled' => (bool) ($r['enabled'] ?? true),
+            ];
+            if (! isset($libreNames[$low])) {
+                $grey[] = $entry;                // rusted but not in LibreNMS -> locked
+                continue;
+            }
+            if (! empty($entry['enabled'])) {
+                $enabledRusted[$low] = true;
+                $right[] = $entry;              // actively managed -> selectable
+            } else {
+                $disabledRusted[$low] = true;   // disabled but still in rusted -> left, recoverable
+            }
+        }
+
+        $left = [];
         foreach ($libre as $d) {
-            if (isset($rustNames[strtolower($d->hostname)])) {
-                continue; // already managed by rusted
+            $low = strtolower($d->hostname);
+            if (isset($enabledRusted[$low])) {
+                continue;                       // actively managed -> belongs in right
             }
             $left[] = [
                 'name'      => $d->hostname,
@@ -219,26 +317,8 @@ class RustedController extends Controller
                 'sysName'   => $d->sysName,
                 'status'    => (bool) $d->status,
                 'disabled'  => (bool) $d->disabled,
+                'rust_state'=> isset($disabledRusted[$low]) ? 'disabled' : 'absent',
             ];
-        }
-
-        foreach ($rusted as $r) {
-            if (empty($r['name'])) {
-                continue;
-            }
-            $entry = [
-                'name'    => $r['name'],
-                'host'    => $r['host'] ?? $r['name'],
-                'driver'  => $r['driver'] ?? '',
-                'group'   => $r['group'] ?? '',
-                'enabled' => (bool) ($r['enabled'] ?? true),
-            ];
-            // A LibreNMS device is identified by hostname; match on that.
-            if (isset($libreNames[strtolower($r['name'])])) {
-                $right[] = $entry; // in rusted AND in LibreNMS → selectable for removal
-            } else {
-                $grey[] = $entry;  // in rusted but NOT in LibreNMS → locked
-            }
         }
 
         return response()->json([
@@ -249,17 +329,17 @@ class RustedController extends Controller
     }
 
     /**
-     * Add the selected LibreNMS devices to rusted using a single driver +
-     * credential (chosen by the user, per-family). Returns which were added and
-     * which failed (failed ones must stay on the left, highlighted red).
+     * Add selected LibreNMS devices to rusted in one batch, using a single
+     * driver + credential (per family). For devices already present in rusted
+     * (disabled), their group/transport are preserved while re-enabling them.
      */
     public function syncAdd(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'driver'    => 'required|string',
-            'credential'=> 'required|string',
-            'devices'   => 'required|array|min:1',
-            'devices.*' => 'required|string',
+            'driver'     => 'required|string',
+            'credential' => 'required|string',
+            'devices'    => 'required|array|min:1',
+            'devices.*'  => 'required|string',
         ]);
 
         $added = [];
@@ -269,13 +349,27 @@ class RustedController extends Controller
             $payload = [
                 'name'       => $host,
                 'host'       => $host,
-                'port'       => 0,            // rusted defaults to 22
+                'port'       => 0,
                 'driver'     => $data['driver'],
                 'transport'  => '',
                 'credential' => $data['credential'],
                 'group'      => '',
                 'enabled'    => true,
             ];
+
+            // If the device already exists in rusted (e.g. disabled), preserve
+            // its group + transport so re-enabling doesn't clobber them.
+            try {
+                $existing = RustedClient::client()->get('/api/devices/'.rawurlencode($host));
+                if ($existing->successful() && is_array($e = $existing->json())) {
+                    $payload['group'] = $e['group'] ?? '';
+                    $payload['transport'] = $e['transport'] ?? '';
+                    $payload['port'] = $e['port'] ?? 0;
+                }
+            } catch (\Throwable) {
+                // not present -> genuinely new; defaults are fine
+            }
+
             try {
                 $r = RustedClient::client()->post('/api/devices', $payload);
             } catch (\Throwable $e) {
@@ -293,77 +387,73 @@ class RustedController extends Controller
     }
 
     /**
-     * Remove the selected rusted devices. To guard against accidental removal,
-     * every revision's configuration is snapshotted into a zip *before* the
-     * rusted DELETE, and the zip is handed back as a one-shot download token.
-     * Devices whose delete fails are returned in `kept` (and stay on the right).
+     * "Remove" selected devices from the right pane by *disabling* them in
+     * rusted (never deleting), so their configuration history is preserved on
+     * disk/git. Disabled devices drop back to the left pane (rust_state=disabled)
+     * and can be re-enabled later with Add. Devices that fail to disable are
+     * returned in `kept` and stay on the right, highlighted red.
      */
-    public function syncRemove(Request $request): JsonResponse
+    public function syncDisable(Request $request): JsonResponse
     {
         $data = $request->validate([
             'devices'   => 'required|array|min:1',
             'devices.*' => 'required|string',
         ]);
 
-        $dir = storage_path('app/rusted-history');
-        if (! is_dir($dir)) {
-            mkdir($dir, 0o755, true);
-        }
-
-        $token = bin2hex(random_bytes(8));
-        $zipPath = $dir.'/'.$token.'.zip';
-        $zip = new ZipArchive();
-        if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-            return response()->json(['error' => 'Could not create history snapshot'], 500);
-        }
-
-        $removed = [];
+        $disabled = [];
         $kept = [];
-        $hadHistory = false;
 
         foreach ($data['devices'] as $host) {
-            $name = $host;
-
-            // Snapshot history first: every version + the latest config.
-            $hadAny = $this->snapshotDevice($zip, $name, $hadHistory);
-            $hadHistory = $hadHistory || $hadAny;
-
-            // Then delete from rusted.
+            // Fetch current device so the upsert preserves name/host/driver/
+            // transport/credential/group, flipping only enabled -> false.
             try {
-                $r = RustedClient::client()->delete('/api/devices/'.rawurlencode($name));
+                $g = RustedClient::client()->get('/api/devices/'.rawurlencode($host));
             } catch (\Throwable $e) {
-                $kept[] = ['name' => $name, 'error' => $e->getMessage()];
+                $kept[] = ['name' => $host, 'error' => $e->getMessage()];
+                continue;
+            }
+            if (! $g->successful()) {
+                $kept[] = ['name' => $host, 'error' => $g->json('error') ?? ('HTTP '.$g->status())];
+                continue;
+            }
+            $e = $g->json();
+            $payload = [
+                'name'       => $e['name'] ?? $host,
+                'host'       => $e['host'] ?? $host,
+                'port'       => $e['port'] ?? 0,
+                'driver'     => $e['driver'] ?? '',
+                'transport'  => $e['transport'] ?? '',
+                'credential' => $e['credential'] ?? '',
+                'group'      => $e['group'] ?? '',
+                'enabled'    => false,
+            ];
+            try {
+                $r = RustedClient::client()->post('/api/devices', $payload);
+            } catch (\Throwable $ex) {
+                $kept[] = ['name' => $host, 'error' => $ex->getMessage()];
                 continue;
             }
             if ($r->successful()) {
-                $removed[] = $name;
+                $disabled[] = $host;
             } else {
-                $kept[] = ['name' => $name, 'error' => $r->json('error') ?? ('HTTP '.$r->status())];
+                $kept[] = ['name' => $host, 'error' => $r->json('error') ?? ('HTTP '.$r->status())];
             }
         }
 
-        $zip->close();
-        if (! $hadHistory) {
-            @unlink($zipPath);
-            $token = null;
-        }
-
-        return response()->json([
-            'removed' => $removed,
-            'kept'    => $kept,
-            'token'   => $token,
-        ]);
+        return response()->json(['disabled' => $disabled, 'kept' => $kept]);
     }
 
     /**
-     * Stream a previously captured history snapshot to the browser, then delete
-     * the temporary file so it cannot be re-downloaded.
+     * Download a device's full configuration history (every git revision +
+     * the latest config) as a zip, so it can be archived before the device is
+     * ever removed from rusted.
      */
-    public function syncHistoryDownload(string $token): Response
+    public function apiHistoryZip(string $name): Response
     {
-        $path = storage_path('app/rusted-history/'.$token.'.zip');
-        if (! is_file($path)) {
-            abort(404, 'snapshot not found or already downloaded');
+        $path = $this->captureHistoryZip($name);
+        if ($path === null) {
+            return response('No configuration history for this device.', 404)
+                ->header('Content-Type', 'text/plain; charset=utf-8');
         }
 
         $content = file_get_contents($path);
@@ -371,21 +461,39 @@ class RustedController extends Controller
 
         return response($content, 200, [
             'Content-Type'        => 'application/zip',
-            'Content-Disposition' => 'attachment; filename="rusted-history-'.$token.'.zip"',
+            'Content-Disposition' => 'attachment; filename="rusted-history-'.$name.'.zip"',
         ]);
     }
 
-    /** Render the bulk-sync page shell. */
-    public function sync(): View
+    /**
+     * Write every revision (and the latest on-disk config) of a device into a
+     * temp zip and return its path, or null if there is no history yet.
+     */
+    private function captureHistoryZip(string $name): ?string
     {
-        return view('rusted::sync');
+        $path = tempnam(sys_get_temp_dir(), 'rusted-history-');
+        $zip = new ZipArchive();
+        if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            @unlink($path);
+            return null;
+        }
+
+        $had = $this->snapshotDevice($zip, $name);
+        $zip->close();
+
+        if (! $had || filesize($path) <= 0) {
+            @unlink($path);
+            return null;
+        }
+
+        return $path;
     }
 
     /**
      * Write every git revision (and the latest config) of a device into $zip.
      * Returns true if anything was captured.
      */
-    private function snapshotDevice(ZipArchive $zip, string $name, bool &$hadHistory): bool
+    private function snapshotDevice(ZipArchive $zip, string $name): bool
     {
         $captured = false;
         try {
@@ -423,30 +531,5 @@ class RustedController extends Controller
         }
 
         return $captured;
-    }
-
-    /**
-     * Execute a rusted API call and forward its JSON + status, turning any
-     * transport failure into a clean 502 so the browser always gets JSON.
-     *
-     * @param  callable(): \Illuminate\Http\Client\Response  $call
-     */
-    private function proxy(callable $call): JsonResponse
-    {
-        try {
-            $resp = $call();
-        } catch (\Throwable $e) {
-            return response()->json(
-                ['error' => 'Could not reach the rusted API: '.$e->getMessage()],
-                502
-            );
-        }
-
-        $body = $resp->json();
-        if (! is_array($body)) {
-            $body = ['raw' => $resp->body()];
-        }
-
-        return response()->json($body, $resp->status() ?: 502);
     }
 }

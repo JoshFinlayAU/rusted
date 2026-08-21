@@ -14,32 +14,36 @@
     <div id="sync-alerts"></div>
 
     <div class="row">
-        <!-- LEFT: LibreNMS devices not yet in rusted -->
+        <!-- LEFT: LibreNMS devices not actively backed up by rusted -->
         <div class="col-md-4">
             <input id="sync-left-filter" class="form-control input-sm" type="text"
                    placeholder="regex filter (hostname / os)">
-            <div id="sync-left" class="list-group" style="max-height:500px;overflow:auto;margin-top:4px">
+            <div id="sync-left" class="list-group" style="max-height:500px;overflow:auto">
                 <div class="list-group-item"><em>Loading&hellip;</em></div>
             </div>
         </div>
 
-        <!-- CENTER: arrows + driver/credential selects (near the add arrow) -->
-        <div class="col-md-4" style="text-align:center;padding-top:38px">
+        <!-- CENTER: arrows + per-family driver/credential -->
+        <div class="col-md-4" style="text-align:center;padding-top:40px">
             <div class="form-group">
-                <label>Driver</label>
+                <label>Driver (applied to the whole batch)</label>
                 <select id="sync-driver" class="form-control input-sm"></select>
-                <p class="help-block" style="margin-top:4px">One driver applied to the whole batch (per family).</p>
             </div>
             <div class="form-group">
                 <label>Credential</label>
                 <select id="sync-credential" class="form-control input-sm"></select>
             </div>
-            <button id="sync-add" class="btn btn-success btn-sm"><i class="fa fa-arrow-right"></i> Add to rusted</button>
-            <button id="sync-remove" class="btn btn-danger btn-sm"><i class="fa fa-arrow-left"></i> Remove from rusted</button>
-            <p class="text-muted" style="margin-top:8px;font-size:12px">
-                Removing a device also deletes its backup history. A zip snapshot
-                of every revision is generated and downloaded first, so history can
-                be recovered if removed by accident.
+            <button id="sync-add" class="btn btn-success btn-sm" style="margin-top:6px">
+                <i class="fa fa-arrow-right"></i> Add to rusted
+            </button>
+            <button id="sync-disable" class="btn btn-danger btn-sm" style="margin-top:6px">
+                <i class="fa fa-arrow-left"></i> Disable in rusted
+            </button>
+            <p class="text-muted" style="margin-top:10px;font-size:12px">
+                Disabling a device stops backups but <strong>preserves its
+                configuration history</strong>; it reappears here so it can be
+                re-enabled. Devices that are in rusted but not in LibreNMS are
+                shown greyed and locked.
             </p>
         </div>
 
@@ -47,7 +51,7 @@
         <div class="col-md-4">
             <input id="sync-right-filter" class="form-control input-sm" type="text"
                    placeholder="regex filter (hostname / driver)">
-            <div id="sync-right" class="list-group" style="max-height:500px;overflow:auto;margin-top:4px">
+            <div id="sync-right" class="list-group" style="max-height:500px;overflow:auto">
                 <div class="list-group-item"><em>Loading&hellip;</em></div>
             </div>
         </div>
@@ -60,12 +64,10 @@
         base: @json(url('plugin/rusted/api')),
         csrf: @json(csrf_token()),
     };
-    const leftFilter = document.getElementById('sync-left-filter');
-    const rightFilter = document.getElementById('sync-right-filter');
     const driverSel = document.getElementById('sync-driver');
     const credSel = document.getElementById('sync-credential');
 
-    // Devices that failed to add/remove on the last action, kept highlighted red.
+    // Hosts that failed the last add/disable, kept highlighted red until a later refresh.
     const errorSet = new Set();
 
     function esc(s) {
@@ -100,16 +102,15 @@
     }
 
     function filterList(listId, re) {
-        const items = document.querySelectorAll('#' + listId + ' .list-group-item');
-        items.forEach(item => {
+        document.querySelectorAll('#' + listId + ' .list-group-item').forEach(item => {
             if (!re) { item.style.display = ''; return; }
             const txt = (item.getAttribute('data-host') || '') + ' ' + (item.getAttribute('data-meta') || '');
             item.style.display = re.test(txt) ? '' : 'none';
         });
     }
 
-    leftFilter.addEventListener('input', () => filterList('sync-left', buildRegex(leftFilter.value)));
-    rightFilter.addEventListener('input', () => filterList('sync-right', buildRegex(rightFilter.value)));
+    document.getElementById('sync-left-filter').addEventListener('input', () => filterList('sync-left', buildRegex(document.getElementById('sync-left-filter').value)));
+    document.getElementById('sync-right-filter').addEventListener('input', () => filterList('sync-right', buildRegex(document.getElementById('sync-right-filter').value)));
 
     function hostOf(item) { return item.getAttribute('data-host') || ''; }
 
@@ -121,37 +122,64 @@
         }
         box.innerHTML = items.map(d => {
             const h = esc(d.name);
-            const yn = d.disabled ? ' <span class="label label-warning">disabled</span>' : (d.status ? '' : ' <span class="label label-danger">down</span>');
-            return '<div class="list-group-item" data-host="' + esc(d.name) + '" data-meta="' + esc(d.os || '') + '">'
-                + '<label style="margin:0"><input type="checkbox" class="sync-check"> '
-                + h + yn + '</label></div>';
+            const rustNote = d.rust_state === 'disabled'
+                ? '<span class="label label-info" title="Already in rusted but disabled — re-adding re-enables it">disabled</span> '
+                : '';
+            const flags = (d.disabled ? '<span class="label label-warning">disabled</span> ' : '')
+                + (!d.status ? '<span class="label label-danger">down</span>' : '');
+            return '<div class="list-group-item" data-host="' + esc(d.name) + '" data-meta="' + esc(d.os || '') + '"'
+                + (d.disabled ? ' style="opacity:0.6"' : '') + '>'
+                + '<input type="checkbox" class="sync-check"> '
+                + '<strong>' + h + '</strong> ' + rustNote + flags
+                + (d.os ? ' <span class="text-muted">' + esc(d.os) + '</span>' : '') + '</div>';
         }).join('');
+        bindList('sync-left');
     }
 
     function renderRight(right, grey) {
         const box = document.getElementById('sync-right');
-        if ((!right || !right.length) && (!grey || !grey.length)) {
+        const rw = Array.isArray(right) ? right : [];
+        const gr = Array.isArray(grey) ? grey : [];
+        if (!rw.length && !gr.length) {
             box.innerHTML = '<div class="list-group-item"><em>No devices managed by rusted yet.</em></div>';
             return;
         }
-        const rows = (right || []).map(d => {
+        const rows = rw.map(d => {
             const h = esc(d.name);
-            return '<div class="list-group-item" data-host="' + esc(d.name) + '" data-meta="' + esc(d.driver || '') + '">'
-                + '<label style="margin:0"><input type="checkbox" class="sync-check"> '
-                + h + ' <small class="text-muted">(' + esc(d.driver || '') + ')</small></label></div>';
+            const drv = esc(d.driver || '');
+            return '<div class="list-group-item" data-host="' + h + '" data-meta="' + drv + '">'
+                + '<input type="checkbox" class="sync-check"> '
+                + '<strong>' + h + '</strong> <small class="text-muted">(' + drv + ')</small> '
+                + '<a href="' + '{{ url('plugin/rusted/device') }}' + '/' + h 
+                + '" class="btn btn-xs btn-default pull-right" title="View configuration pippo"><i class="fa fa-eye"></i></a>'
+                + '</div>';
         });
-        const greys = (grey || []).map(d => {
+        const greys = gr.map(d => {
             const h = esc(d.name);
-            return '<div class="list-group-item list-group-item-default" data-host="' + esc(d.name) + '" data-meta="' + esc(d.driver || '') + '">'
-                + '<label style="margin:0"><input type="checkbox" class="sync-check" disabled> '
-                + h + ' <small class="text-muted">(' + esc(d.driver || '') + ')</small> '
-                + '<span class="text-muted" title="Not present in LibreNMS — not selectable">ⓘ not in LibreNMS</span></label></div>';
+            return '<div class="list-group-item list-group-item-default" data-host="' + h + '" data-meta="' + esc(d.driver || '') + '">'
+                + '<input type="checkbox" class="sync-check" disabled> '
+                + '<strong>' + h + '</strong> <small class="text-muted">(' + esc(d.driver || '') + ')</small> '
+                + '<span class="text-muted" title="In rusted but not in LibreNMS — not selectable">ⓘ not in LibreNMS</span></div>';
         });
         box.innerHTML = rows.concat(greys).join('');
+        bindList('sync-right');
+    }
+
+    // Click the row to toggle its checkbox (unless clicking the checkbox or a
+    // link directly). Disabled (greyed) checkboxes never toggle.
+    function bindList(listId) {
+        const box = document.getElementById(listId);
+        box.addEventListener('click', e => {
+            if (e.target.closest('.sync-check')) return;     // native checkbox toggle
+            if (e.target.closest('a')) return;               // let the link navigate
+            const item = e.target.closest('.list-group-item');
+            if (!item) return;
+            const cb = item.querySelector('.sync-check');
+            if (cb && !cb.disabled) cb.toggle();
+        });
     }
 
     function applyErrors() {
-        if (!errorSet.size) return;
         document.querySelectorAll('#sync-left .list-group-item, #sync-right .list-group-item').forEach(item => {
             item.classList.toggle('list-group-item-danger', errorSet.has(hostOf(item)));
         });
@@ -166,7 +194,7 @@
         const r = await apiJson('GET', '/drivers');
         const drivers = (r.ok && Array.isArray(r.data)) ? r.data : [];
         driverSel.innerHTML = '<option value="" disabled selected>driver</option>'
-            + drivers.map(d => '<option value="' + esc(d.name) + '">' + esc(d.name) + ' — ' + esc(d.description || '') + '</option>').join('');
+            + (drivers.map(d => '<option value="' + esc(d.name) + '">' + esc(d.name) + '</option>')).join('');
     }
 
     async function loadCredentials() {
@@ -195,22 +223,21 @@
         if (!driver) return alertBox('warning', 'Pick a driver.');
         if (!credential) return alertBox('warning', 'Pick a credential.');
 
-        document.getElementById('sync-add').disabled = true;
-        document.getElementById('sync-add').innerHTML = '<i class="fa fa-spinner fa-spin"></i> Adding&hellip;';
+        const btn = document.getElementById('sync-add');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Adding&hellip;';
         const r = await apiJson('POST', '/sync/add', { driver: driver, credential: credential, devices: devices });
-        document.getElementById('sync-add').disabled = false;
-        document.getElementById('sync-add').innerHTML = '<i class="fa fa-arrow-right"></i> Add to rusted';
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa fa-arrow-right"></i> Add to rusted';
 
-        if (r.ok) {
-            if (r.data && r.data.failed && r.data.failed.length) {
+        if (r.ok && r.data) {
+            if (r.data.failed && r.data.failed.length) {
                 r.data.failed.forEach(f => errorSet.add(f.name));
+                alertBox('danger', r.data.failed.length + ' device(s) failed to add; they stay on the left, highlighted red.');
             }
-            if (r.data && r.data.added && r.data.added.length) {
+            if (r.data.added && r.data.added.length) {
                 r.data.added.forEach(n => errorSet.delete(n));
                 alertBox('success', 'Added ' + r.data.added.length + ' device(s) to rusted.');
-            }
-            if (r.data && r.data.failed && r.data.failed.length) {
-                alertBox('danger', r.data.failed.length + ' device(s) failed to add; they stay on the left, highlighted red.');
             }
         } else {
             alertBox('danger', 'Add failed: ' + ((r.data && (r.data.error || r.data.message)) || ('HTTP ' + r.status)));
@@ -218,42 +245,35 @@
         loadState();
     });
 
-    document.getElementById('sync-remove').addEventListener('click', async () => {
+    document.getElementById('sync-disable').addEventListener('click', async () => {
         const devices = selectedIn('sync-right');
         if (!devices.length) return alertBox('warning', 'Select devices from the right list (greyed rows are not selectable).');
 
-        const msg = 'Remove ' + devices.length + ' device(s) from rusted?\n\n'
-            + 'This deletes them and their configuration history from rusted.\n'
-            + 'A zip snapshot of every revision will be downloaded first, so the\n'
-            + 'history can be recovered if this was a mistake.\n\n'
+        const msg = 'Disable ' + devices.length + ' device(s) in rusted?\n\n'
+            + 'This stops backups for them but preserves their configuration\n'
+            + 'history and keeps them in rusted. Disabled devices reappear on the\n'
+            + 'left list and can be re-enabled later.\n\n'
             + 'Confirm to proceed.';
         if (!confirm(msg)) return;
 
-        document.getElementById('sync-remove').disabled = true;
-        document.getElementById('sync-remove').innerHTML = '<i class="fa fa-spinner fa-spin"></i> Removing&hellip;';
-        const r = await apiJson('POST', '/sync/remove', { devices: devices });
-        document.getElementById('sync-remove').disabled = false;
-        document.getElementById('sync-remove').innerHTML = '<i class="fa fa-arrow-left"></i> Remove from rusted';
+        const btn = document.getElementById('sync-disable');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Disabling&hellip;';
+        const r = await apiJson('POST', '/sync/disable', { devices: devices });
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa fa-arrow-left"></i> Disable in rusted';
 
-        if (r.ok) {
-            if (r.data && r.data.removed && r.data.removed.length) {
-                r.data.removed.forEach(n => errorSet.delete(n));
-            }
-            if (r.data && r.data.failed) {
-                // server returns "kept" for deletes that failed
-            }
-            if (r.data && r.data.token) {
-                alertBox('info', 'Removed ' + (r.data.removed||[]).length + ' device(s). Downloading history snapshot&hellip;');
-                window.location.href = @json(url('plugin/rusted/api/sync/history')) + '/' + encodeURIComponent(r.data.token);
-            } else {
-                alertBox('success', 'Removed ' + (r.data.removed||[]).length + ' device(s). No history to archive.');
-            }
-            if (r.data && r.data.kept && r.data.kept.length) {
+        if (r.ok && r.data) {
+            if (r.data.kept && r.data.kept.length) {
                 r.data.kept.forEach(k => errorSet.add(k.name));
-                alertBox('warning', r.data.kept.length + ' device(s) could not be removed and remain managed.');
+                alertBox('warning', r.data.kept.length + ' device(s) could not be disabled and remain managed.');
+            }
+            if (r.data.disabled && r.data.disabled.length) {
+                r.data.disabled.forEach(n => errorSet.delete(n));
+                alertBox('success', 'Disabled ' + r.data.disabled.length + ' device(s). Their history is preserved in rusted.');
             }
         } else {
-            alertBox('danger', 'Remove failed: ' + ((r.data && (r.data.error || r.data.message)) || ('HTTP ' + r.status)));
+            alertBox('danger', 'Disable failed: ' + ((r.data && (r.data.error || r.data.message)) || ('HTTP ' + r.status)));
         }
         loadState();
     });
