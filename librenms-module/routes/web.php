@@ -11,6 +11,9 @@ Route::middleware(['web', 'auth'])->prefix('plugin/rusted')->name('rusted.')->gr
     // diff two revisions.
     Route::get('/device/{name}', [RustedController::class, 'device'])->name('device.show');
 
+    // Bulk sync page: move LibreNMS devices into/out of rusted in batches.
+    Route::get('/sync', [RustedController::class, 'sync'])->name('sync');
+
     // Same-origin AJAX/JSON receiver. The browser posts here; the controller
     // relays to the rusted API. No reverse proxy required.
     Route::prefix('api')->name('api.')->group(function (): void {
@@ -33,5 +36,13 @@ Route::middleware(['web', 'auth'])->prefix('plugin/rusted')->name('rusted.')->gr
         Route::get('devices/{name}/config', [RustedController::class, 'apiConfig'])->name('devices.config');
         Route::get('devices/{name}/versions', [RustedController::class, 'apiVersions'])->name('devices.versions');
         Route::get('devices/{name}/diff', [RustedController::class, 'apiDiff'])->name('devices.diff');
+
+        // Bulk sync helpers.
+        Route::prefix('sync')->name('sync.')->group(function (): void {
+            Route::get('state', [RustedController::class, 'syncState'])->name('state');
+            Route::post('add', [RustedController::class, 'syncAdd'])->name('add');
+            Route::post('remove', [RustedController::class, 'syncRemove'])->name('remove');
+            Route::get('history/{token}', [RustedController::class, 'syncHistoryDownload'])->name('history');
+        });
     });
 });

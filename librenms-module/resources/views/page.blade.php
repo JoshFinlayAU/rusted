@@ -4,7 +4,11 @@
 
 @section('content')
 <div class="container-fluid">
-    <h2><i class="fa fa-floppy-o"></i> Rusted &mdash; Configuration Backups</h2>
+    <h2><i class="fa fa-floppy-o"></i> Rusted &mdash; Configuration Backups
+        <a href="{{ route('rusted.sync') }}" class="btn btn-xs btn-default pull-right" title="Bulk device sync">
+            <i class="fa fa-exchange"></i> Device sync
+        </a>
+    </h2>
 
     <div id="rusted-alerts"></div>
 

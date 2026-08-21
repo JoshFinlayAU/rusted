@@ -16,6 +16,12 @@ the `rusted serve` HTTP API.
   per device — pick any revision and read it back.
 - **Compare two revisions** of a device's config with an inline unified-diff
   viewer (or view what a single revision changed over its parent).
+- **Bulk device sync** — a two-pane view (LibreNMS-only ↔ managed by rusted) to
+  add many devices to rusted in one operation (a single driver + credential per
+  batch, per family), or remove them. Orphaned rusted devices (not in LibreNMS)
+  are shown greyed and locked. Removing a device first generates a zip snapshot
+  of every stored revision and offers it for download, so history can be recovered
+  if a device is removed by mistake.
 - **Trigger a backup on demand** with inline success/failure feedback.
 - A **Configuration Backups panel on every device's Overview page** showing the
   last backup, a "Back up now" button, and a one-click "View configuration" link
@@ -191,14 +197,15 @@ src/Support/RustedClient.php      server-side HTTP client for the rusted API
 src/Hooks/MenuEntry.php           menu hook
 src/Hooks/Settings.php            settings hook
 src/Hooks/DeviceOverview.php      per-device Overview-page panel hook
-src/Controllers/RustedController.php  page + device viewer shell + JSON/AJAX receiver
-resources/views/                  menu, page, device, device-overview, settings (Blade)
+src/Controllers/RustedController.php  page + device viewer + bulk-sync shells + JSON/AJAX/text receiver
+resources/views/                  menu, page, device, sync, device-overview, settings (Blade)
 ```
 
 ## Routes
 
 The page is `GET plugin/rusted`. A per-device configuration viewer lives at
-`GET plugin/rusted/device/{name}`. The browser's AJAX calls hit the same-origin
+`GET plugin/rusted/device/{name}`, and the bulk device-sync page at
+`GET plugin/rusted/sync`. The browser's AJAX calls hit the same-origin
 receiver (all `web`+`auth`+CSRF protected):
 
 | Method & path | Relays to rusted |
@@ -212,6 +219,10 @@ receiver (all `web`+`auth`+CSRF protected):
 | `GET plugin/rusted/api/devices/{name}/versions` | `GET /api/devices/{name}/versions` (revision list) |
 | `GET plugin/rusted/api/devices/{name}/config?commit=<hash>` | `GET /api/devices/{name}/config` — latest, or `?commit=` for a revision (**text/plain**) |
 | `GET plugin/rusted/api/devices/{name}/diff?from=<a>&to=<b>` | `GET /api/devices/{name}/diff` — unified diff (`from` alone = that revision's change; `from`+`to` = between two) (**text/plain**) |
+| `GET plugin/rusted/api/sync/state` | joins LibreNMS devices with rusted → `{left, right, grey}` |
+| `POST plugin/rusted/api/sync/add` | batches `POST /api/devices` (single driver + credential, per family) |
+| `POST plugin/rusted/api/sync/remove` | snapshots history to a zip, then batches `DELETE /api/devices/{name}` |
+| `GET plugin/rusted/api/sync/history/{token}` | one-shot download of a removal history zip, then deletes it |
 | `GET plugin/rusted/api/credentials` | `GET /api/credentials` |
 | `POST plugin/rusted/api/credentials` | `POST /api/credentials` |
 | `DELETE plugin/rusted/api/credentials/{name}` | `DELETE /api/credentials/{name}` |
@@ -227,3 +238,35 @@ raw config / unified diff payload) and turn any transport failure into a clean
 > Note: credentials are intentionally **not** managed from the web UI. Manage
 > them with the `rusted cred` CLI and reference them by name when adding a
 > device.
+
+## Bulk device sync
+
+A two-pane view at **Rusted Backups → Device sync** (the `Device sync` button on the
+main page) moves LibreNMS devices into and out of rusted in batches. Devices are
+matched by **LibreNMS hostname == rusted device name**.
+
+- **Left pane** — LibreNMS devices that are *not* managed by rusted (candidates
+  to add).
+- **Right pane** — rusted devices that are *also* in LibreNMS (selectable to
+  remove).
+- **Greyed (locked)** rows — rusted devices that are **not** in LibreNMS; shown
+  for awareness but not selectable.
+
+Each pane has a **regex filter** (hostname / os / driver) above it. The → and ←
+buttons move the selected rows between the panes:
+
+- **Add to rusted (→):** pick one **driver** and one **credential** (applied to
+  the whole batch, so you add one family of devices at a time). Each device is
+  added to rusted; devices that fail to add are kept on the left and
+  highlighted red, with the rusted error message.
+- **Remove from rusted (←):** confirms the consequence, then for every removed
+  device fetches **every git revision** of its config (plus the latest), packs
+  them into a **zip** (`name/<commit>.cfg`, `name/latest.cfg`), deletes the device
+  from rusted, and **downloads the zip** so the history can be recovered if the
+  removal was a mistake. Devices that could not be deleted remain managed and are
+  highlighted red.
+
+> The history zip is a **plugin-side fallback** for an accidental removal. A true
+> "soft-delete / archive" so the device and its history could be restored in place
+> would require a small rusted backend feature (a rusted-side device archive); the
+> zip above is recoverable raw configs only.
