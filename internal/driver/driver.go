@@ -116,7 +116,7 @@ func builtins() []Driver {
 		{
 			Name:        "cisco_ios",
 			Description: "Cisco IOS / IOS-XE",
-			Init:        []string{"terminal length 0", "terminal width 0"},
+			Init:        []string{"enable", "terminal length 0", "terminal width 0"},
 			Config:      []string{"show running-config"},
 			Strip: []*regexp.Regexp{
 				re(`^Building configuration`),

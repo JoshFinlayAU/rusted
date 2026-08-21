@@ -11,9 +11,15 @@ bundled **LibreNMS** integration.
 
 ## Features
 
-- **SSH transport**, with a documented, pluggable transport interface
-  (telnet/NETCONF/REST can be added without touching the core) — see
+- **SSH and telnet transports**, with a documented, pluggable transport interface
+  (NETCONF/REST/serial can be added without touching the core) — see
   [docs/transport-modules.md](docs/transport-modules.md).
+- **Cisco enable-mode support**: when a credential has an `enable` password
+  configured, rusted sends `enable` and responds to the `Password:` prompt
+  automatically (for `cisco_ios`, `cisco_asa`, etc.).
+- **Per-device timeout tuning**: slow or high-latency devices can override the
+  command timeout (`--cmd-timeout`) and idle timeout (`--idle-timeout`) so slow
+  output is not truncated prematurely.
 - **Per-platform drivers** that know how to disable paging and dump config —
   see [docs/drivers.md](docs/drivers.md).
 - **Change-stable backups**: volatile lines are stripped *and* inline
@@ -34,8 +40,8 @@ Officially supported (per the project spec):
 - **MikroTik RouterOS v7+** — `mikrotik_routeros`
 - **Juniper Junos** — `juniper_junos`
 
-Also bundled: `cisco_ios`, `cisco_asa`, `arista_eos`, `fortinet`, `vyos`,
-`generic`. Run `rusted driver list` to see them all.
+Also bundled: `cisco_ios` (with enable-mode escalation), `cisco_asa`, `arista_eos`,
+`fortinet`, `vyos`, `generic`. Run `rusted driver list` to see them all.
 
 ## Install
 
@@ -105,6 +111,13 @@ rusted device add nexus1  -H 10.0.0.1 -d cisco_nxos        -c lab -g datacenter
 rusted device add edge-mt -H 10.0.0.2 -d mikrotik_routeros -c lab
 rusted device add core-mx -H 10.0.0.3 -d juniper_junos     -c lab
 
+# Cisco IOS over telnet with longer timeouts for a slow device
+rusted device add ios-1  -H 10.0.0.4 -d cisco_ios -c lab \
+  --transport telnet -P 23 --cmd-timeout 120 --idle-timeout 2000
+
+# Update an existing device (change transport, driver, timeouts, etc.)
+rusted device update ios-1 --transport telnet --cmd-timeout 120
+
 # Back up one device, or everything enabled
 rusted backup run nexus1
 rusted backup run --all
@@ -121,9 +134,10 @@ git -C "$(rusted config show | awk '/backups:/{print $2}')" log --oneline
 | `rusted init` | Create the DB and backup repo |
 | `rusted config init/show` | Create or display the config file |
 | `rusted cred add/list/remove` | Manage login credentials |
-| `rusted device add/list/remove/enable/disable` | Manage device inventory |
+| `rusted device add/list/remove/update/enable/disable` | Manage device inventory |
 | `rusted driver list` | List platform drivers |
 | `rusted backup run [NAME] [--all]` | Run backups |
+| `rusted backup run -v` | Run backups with verbose stderr progress |
 | `rusted backup history NAME` | Show a device's backup history |
 | `rusted serve` | Run the HTTP API for LibreNMS |
 
@@ -180,6 +194,33 @@ the result to `backups/<group>/<device>.cfg`. It commits **only if the file
 content actually changed** — so timestamps, uptimes, and "last changed" banners
 never create noise in your git history. A run is recorded as `success`
 (committed), `unchanged` (no diff), or `failed`.
+
+### Backup error reporting
+
+When a backup fails, rusted prints the failure reason to **stderr** (even without
+`--verbose`) and exits non-zero so schedulers/sensors catch it:
+
+```
+FAIL core-sw1: connect: dial tcp 10.0.0.1:23: connection refused
+FAIL edge-fw: init command "enable": Password: prompt but no enable password
+```
+
+For real-time progress on a long run, use `--verbose` (`-v`):
+
+```
+rusted backup run core-sw1 -v
+```
+
+```
+=== core-sw1 [10.0.0.1:cisco_ios] ===
+  using transport "ssh", driver "cisco_ios"
+  connected, running 3 init command(s)
+  init commands ok, collecting config (1 command(s))
+  captured 4240 bytes, saving to git...
+```
+
+Use `rusted backup history NAME` to see the full recorded message for any past
+run (including failures).
 
 ## Scheduled backups
 
@@ -254,12 +295,26 @@ Run it once by hand to verify: `sudo systemctl start rusted-backup.service`.
 > Tip: this is independent of `rusted serve`. You can run the API service
 > (`--service` in the installer) *and* a backup timer side by side.
 
-## Roadmap
+## Per-device timeouts
 
-- `known_hosts` host-key pinning (SSH currently accepts any host key).
-- Concurrent `--all` backups with a worker pool.
-- Webhook/Slack notifications on backup failure.
-- Telnet and NETCONF transports.
+Network devices vary widely in how fast they emit output. rusted exposes two
+per-device timeout overrides that override the engine-wide defaults (60s command
+timeout, 700ms idle window):
+
+| Flag | Stored as | Default | When to raise it |
+|---|---|---|---|
+| `--cmd-timeout SECONDS` | `cmd_timeout` | 60 | Large configs on slow CPUs that take >60s to dump |
+| `--idle-timeout MILLISECONDS` | `idle_timeout` | 700 | Devices that pause >700ms between output lines, causing premature truncation |
+
+Example:
+
+```sh
+rusted device add legacy-sw --host 10.0.0.5 -d cisco_ios -c lab --transport ssh \
+  --cmd-timeout 180 --idle-timeout 3000
+```
+
+These are also available on `rusted device update`. Use `rusted device list` to
+inspect configured timeouts per device.
 
 ## Project layout
 
@@ -269,7 +324,7 @@ cmd/rusted/         CLI (cobra)
 internal/config/    config file + env + flag resolution
 internal/store/     SQLite: credentials, devices, run history
 internal/secret/    AES-GCM encryption-at-rest
-internal/transport/ transport interface + SSH implementation
+internal/transport/ transport interface + SSH + telnet implementations
 internal/driver/    per-platform drivers
 internal/normalize/ dynamic-string (timestamp/date/uptime) masking
 internal/gitstore/  git-backed backup storage
@@ -278,3 +333,10 @@ internal/api/       HTTP API for LibreNMS
 librenms-module/    LibreNMS plugin
 docs/               transport & driver authoring guides
 ```
+
+## Roadmap
+
+- `known_hosts` host-key pinning (SSH currently accepts any host key).
+- Concurrent `--all` backups with a worker pool.
+- Webhook/Slack notifications on backup failure.
+- NETCONF transport.

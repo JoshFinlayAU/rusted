@@ -137,15 +137,63 @@ func (*SSH) Dial(ctx context.Context, t Target) (Session, error) {
 		stdin:       stdin,
 		out:         make(chan []byte, 64),
 		done:        make(chan error, 1),
-		idle:        700 * time.Millisecond,
-		readTimeout: 60 * time.Second,
+		idle:        idleTimeout(t),
+		readTimeout: cmdTimeout(t),
+		enable:      t.Enable,
 	}
 	go s.reader(stdout)
 
 	// Consume the login banner / initial prompt so it does not contaminate the
 	// first command's output.
 	s.drain(10 * time.Second)
+
+	// Cisco IOS (and similar) land in user-exec mode ("Router>") after login;
+	// privileged mode ("Router#") is required for commands like "show
+	// running-config". If an enable password was supplied, send "enable" and
+	// elevate now, before the driver starts emitting Init/Config commands.
+	if t.Enable != "" {
+		if err := s.elevate(t.Enable); err != nil {
+			client.Close()
+			sess.Close()
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// usernamePrompt matches "Username:" / "login:" styles.
+var usernamePrompt = regexp.MustCompile(`(?i)(u?ser ?name|log ?in)[:\s]*$`)
+
+// passwordPrompt matches "Password:" / "Passphrase:" — used both for the initial
+// telnet login and for the Cisco "enable" privilege escalation.
+var passwordPrompt = regexp.MustCompile(`(?i)pass(word|phrase)[:\s]*$`)
+
+// privilegedPromptRe matches a prompt ending in "#" (Cisco IOS/NX-OS/ASA
+// enable mode), as opposed to ">" (user exec) or "$" (shells).
+var privilegedPromptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+#\s*$`)
+
+// elevate sends "enable" and the privileged-mode password, then waits for the
+// device to land in enable mode (prompts ending in "#"). If the device does not
+// prompt for a password, it is assumed to already be in enable mode (or does
+// not require enable at all) and the call succeeds.
+func (s *sshSession) elevate(enablePassword string) error {
+	_, _ = io.WriteString(s.stdin, "enable\n")
+	out := s.drain(s.readTimeout)
+
+	if !passwordPrompt.MatchString(out) {
+		// No password prompt — either already privileged or enable isn't needed.
+		if privilegedPromptRe.MatchString(tail([]byte(out), 200)) {
+			return nil
+		}
+		return nil
+	}
+
+	_, _ = io.WriteString(s.stdin, enablePassword+"\n")
+	out = s.drain(s.readTimeout)
+	if !privilegedPromptRe.MatchString(tail([]byte(out), 200)) {
+		return fmt.Errorf("did not reach privileged mode after enable")
+	}
+	return nil
 }
 
 type sshSession struct {
@@ -156,6 +204,7 @@ type sshSession struct {
 	done        chan error
 	idle        time.Duration
 	readTimeout time.Duration
+	enable      string
 }
 
 func (s *sshSession) reader(r io.Reader) {
@@ -208,13 +257,36 @@ func (s *sshSession) drain(maxWait time.Duration) string {
 	}
 }
 
-// SendCommand implements Session.
+// SendCommand implements Session. It writes the command, waits for the device's
+// prompt to reappear, and strips the echoed command + trailing prompt — reusing
+// the shared cleanOutput helper. If the device responds with a Password: prompt
+// (as happens when a driver sends "enable" to enter privileged mode on Cisco
+// IOS), SendCommand automatically sends Target.Enable and reads the follow-up
+// output.
 func (s *sshSession) SendCommand(cmd string) (string, error) {
 	if _, err := io.WriteString(s.stdin, cmd+"\n"); err != nil {
 		return "", err
 	}
 	raw := s.drain(s.readTimeout)
+	raw = s.respondToEnablePrompt(raw)
 	return cleanOutput(cmd, raw), nil
+}
+
+// respondToEnablePrompt detects an interactive Password: prompt (triggered by
+// the "enable" Init command on Cisco IOS) and, if an enable password is
+// configured, sends it and reads the follow-up output.
+func (s *sshSession) respondToEnablePrompt(raw string) string {
+	if s.enable == "" {
+		return raw
+	}
+	if !passwordPrompt.MatchString(raw) {
+		return raw
+	}
+	if _, err := io.WriteString(s.stdin, s.enable+"\n"); err != nil {
+		return raw
+	}
+	raw += s.drain(s.readTimeout)
+	return raw
 }
 
 // Close implements Session.
@@ -264,4 +336,26 @@ func defaultKEX() []string {
 func defaultCiphers() []string {
 	return []string{"chacha20-poly1305@openssh.com", "aes128-gcm@openssh.com",
 		"aes256-gcm@openssh.com", "aes128-ctr", "aes192-ctr", "aes256-ctr"}
+}
+
+// defaultCmdTimeout is the per-command hard timeout when Target.CmdTimeout is
+// not set (0). Slower devices can raise this via the --cmd-timeout flag.
+const defaultCmdTimeout = 60 * time.Second
+
+// defaultIdleTimeout is the idle window after which a non-prompting stream is
+// considered complete. Raise it for devices that pause >700ms mid-output.
+const defaultIdleTimeout = 700 * time.Millisecond
+
+func cmdTimeout(t Target) time.Duration {
+	if t.CmdTimeout > 0 {
+		return t.CmdTimeout
+	}
+	return defaultCmdTimeout
+}
+
+func idleTimeout(t Target) time.Duration {
+	if t.IdleTimeout > 0 {
+		return t.IdleTimeout
+	}
+	return defaultIdleTimeout
 }

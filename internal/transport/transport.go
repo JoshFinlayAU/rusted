@@ -23,7 +23,15 @@ type Target struct {
 	Password   string
 	PrivateKey []byte // optional PEM private key
 	Enable     string // optional privileged-mode password
-	Timeout    time.Duration
+	Timeout    time.Duration // dial/connect timeout (SSH handshake, TCP connect)
+	// CmdTimeout is the hard timeout for a single SendCommand call. Zero means
+	// the engine default (60s). Override for slow devices that take longer to
+	// emit their full config.
+	CmdTimeout time.Duration
+	// IdleTimeout is the idle window after which a non-prompting stream is
+	// considered complete (default 700ms). Increase for devices that pause
+	// mid-output for longer than 700ms.
+	IdleTimeout time.Duration
 }
 
 // Session is an open interactive connection to a device.
