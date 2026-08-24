@@ -78,15 +78,21 @@ func deviceListCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			devs, err := st.ListDevices()
+			devs, err := st.ListDevicesWithStatus()
 			if err != nil {
 				return err
 			}
 			tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tHOST\tPORT\tDRIVER\tTRANSPORT\tCMD_TIMEOUT\tIDLE_MS\tGROUP\tENABLED")
+			fmt.Fprintln(tw, "NAME\tHOST\tPORT\tDRIVER\tTRANSPORT\tCMD_TIMEOUT\tIDLE_MS\tGROUP\tENABLED\tLAST_BACKUP\tLAST_STATUS")
 			for _, d := range devs {
 				cmdT, idleT := dashInt(d.CmdTimeout), dashInt(d.IdleTimeout)
-				fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Name, d.Host, d.Port, d.Driver, dash(d.Transport), cmdT, idleT, dash(d.Group), yesno(d.Enabled))
+				lastBackup := "-"
+				if d.LastBackup != nil {
+					lastBackup = d.LastBackup.Format("2006-01-02 15:04:05")
+				}
+				lastStatus := dash(d.LastStatus)
+				fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					d.Name, d.Host, d.Port, d.Driver, dash(d.Transport), cmdT, idleT, dash(d.Group), yesno(d.Enabled), lastBackup, lastStatus)
 			}
 			return tw.Flush()
 		},

@@ -12,6 +12,8 @@
 
     <div id="rusted-alerts"></div>
 
+    @csrf
+
     <div class="panel panel-default">
         <div class="panel-heading">
             <strong>Devices</strong>
@@ -21,15 +23,16 @@
         </div>
         <div class="panel-body">
             <table class="table table-condensed table-hover">
-                <thead>
-                    <tr>
-                        <th>Name</th><th>Host</th><th>Port</th>
-                        <th>Driver</th><th>Group</th><th>Enabled</th><th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="rusted-devices">
-                    <tr><td colspan="7"><em>Loading&hellip;</em></td></tr>
-                </tbody>
+                 <thead>
+                     <tr>
+                         <th>Name</th><th>Host</th><th>Port</th>
+                         <th>Driver</th><th>Transport</th><th>Auth</th><th>Group</th>
+                         <th>Backup</th><th>Actions</th>
+                     </tr>
+                 </thead>
+             <tbody id="rusted-devices">
+                 <tr><td colspan="9"><em>Loading&hellip;</em></td></tr>
+             </tbody>
             </table>
         </div>
     </div>
@@ -43,6 +46,9 @@
                 <input class="form-control input-sm" type="number" name="port" placeholder="22" style="width:80px">
                 <select class="form-control input-sm" name="driver" id="rusted-driver" required>
                     <option value="" disabled selected>driver</option>
+                </select>
+                <select class="form-control input-sm" name="transport" id="rusted-transport">
+                    <option value="" selected>transport (default: ssh)</option>
                 </select>
                 <select class="form-control input-sm" name="credential" id="rusted-credential" required>
                     <option value="" disabled selected>credential</option>
@@ -63,9 +69,9 @@
                 <thead>
                     <tr><th>Name</th><th>Username</th><th>Password</th><th>Key</th><th>Enable</th><th>Actions</th></tr>
                 </thead>
-                <tbody id="rusted-credentials">
-                    <tr><td colspan="6"><em>Loading&hellip;</em></td></tr>
-                </tbody>
+            <tbody id="rusted-credentials">
+                <tr><td colspan="6"><em>Loading&hellip;</em></td></tr>
+            </tbody>
             </table>
             <form id="rusted-cred-add" class="form-inline">
                 <input class="form-control input-sm" type="text" name="name" placeholder="name" required>
@@ -87,14 +93,12 @@
         base: @json(url('plugin/rusted/api')),
         csrf: @json(csrf_token()),
     };
-    // Root of the per-device viewer (plugin/rusted/device/{name}) — the "show
-    // history / view configuration" destination, shared with the device
-    // Overview panel.
     const DEVICE_VIEW = @json(url('plugin/rusted/device'));
 
     const $devices = document.getElementById('rusted-devices');
     const $alerts = document.getElementById('rusted-alerts');
     const $driver = document.getElementById('rusted-driver');
+    const $transport = document.getElementById('rusted-transport');
     const $form = document.getElementById('rusted-add');
     const $credentials = document.getElementById('rusted-credentials');
     const $credForm = document.getElementById('rusted-cred-add');
@@ -145,12 +149,101 @@
         return '<span class="label label-' + kind + '">' + esc(text) + '</span>';
     }
 
-    // Each device row carries the SAME four icon buttons as the per-device
-    // Overview panel (Enabled toggle, Back up, Show history, Remove), wired to
-    // the same actions.
+    // ---- Backup status indicator ----
+    // Shows at a glance whether a device config is current:
+    //   never backed up         -> grey circle "never"
+    //   < 24h + success/unchanged -> green check "UP TO DATE"
+    //   > 24h + success/unchanged -> grey "?" (stale but not failed)
+    //   last run failed         -> red triangle with failure message
+    function backupStatus(d) {
+        const ts = d.last_backup;
+        const st = d.last_status;
+        if (!ts) {
+            return '<span class="text-muted" title="no backups yet"><i class="fa fa-circle-o text-muted"></i> never</span>';
+        }
+        const dt = new Date(ts);
+        const ageH = (Date.now() - dt.getTime()) / 3600000;
+        const ok = st === 'success' || st === 'unchanged';
+        let icon, color, tip;
+        if (st === 'failed') {
+            icon = 'fa-exclamation-triangle'; color = 'text-danger';
+            tip = 'Failed ' + dt.toLocaleString() + ': ' + (d.last_message || '');
+        } else if (!ok) {
+            icon = 'fa-question-circle'; color = 'text-muted';
+            tip = dt.toLocaleString();
+        } else if (ageH < 24) {
+            icon = 'fa-check-circle'; color = 'text-success';
+            tip = 'Up to date (' + dt.toLocaleString() + ')';
+        } else {
+            icon = 'fa-question-circle'; color = 'text-muted';
+            tip = 'Last backup ' + Math.floor(ageH) + 'h ago (' + dt.toLocaleString() + ')';
+        }
+        return '<span class="' + color + '" title="' + tip + '" data-toggle="tooltip">' +
+            '<i class="fa ' + icon + '"></i>' + '</span>';
+    }
+
+    // ---- Transport options ----
+    let transportOptions = [];
+    async function loadTransports() {
+        try {
+            transportOptions = await api('GET', '/transports') || [];
+        } catch (e) {
+            alertBox('warning', 'Could not load transports: ' + e.message);
+            transportOptions = ['ssh', 'telnet'];
+        }
+        // Populate the Add Device form dropdown.
+        $transport.innerHTML = '<option value="" selected>transport (default: ssh)</option>' +
+            transportOptions.map(t => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('');
+    }
+
+    // ---- Driver options ----
+    let driverOptions = [];
+    async function loadDrivers() {
+        try {
+            driverOptions = await api('GET', '/drivers') || [];
+            (driverOptions || []).forEach(function (drv) {
+                const opt = document.createElement('option');
+                opt.value = drv.name;
+                opt.textContent = drv.name;
+                $driver.appendChild(opt);
+            });
+        } catch (e) {
+            alertBox('warning', 'Could not load drivers: ' + e.message);
+        }
+    }
+
+    function driverSelect(d) {
+        const opts = '<option value="">(auto)</option>' + driverOptions.map(drv =>
+            '<option value="' + esc(drv.name) + '" ' + (d.driver === drv.name ? 'selected' : '') + '>' + esc(drv.name) + '</option>'
+        ).join('');
+        return '<select class="form-control input-sm input-xs rusted-edit" data-field="driver" data-name="' + esc(d.name) + '">' + opts + '</select>';
+    }
+
+    function transportSelect(d) {
+        const opts = '<option value="" ' + (!d.transport ? 'selected' : '') + '>default (ssh)</option>' +
+            transportOptions.map(t => '<option value="' + esc(t) + '" ' + (d.transport === t ? 'selected' : '') + '>' + esc(t) + '</option>'
+        ).join('');
+        return '<select class="form-control input-sm input-xs rusted-edit" data-field="transport" data-name="' + esc(d.name) + '">' + opts + '</select>';
+    }
+
+    // ---- Credential options ----
+    let credentialOptions = [];
+    function credentialSelect(d) {
+        const opts = credentialOptions.map(c =>
+            '<option value="' + esc(c.name) + '" ' + (d.credential === c.name ? 'selected' : '') + '>' + esc(c.name) + '</option>'
+        ).join('');
+        return '<select class="form-control input-sm input-xs rusted-edit" data-field="credential" data-name="' + esc(d.name) + '">' + opts + '</select>';
+    }
+
+    function portInput(d) {
+        return '<input type="number" class="form-control input-sm input-xs rusted-edit" data-field="port" ' +
+            'data-name="' + esc(d.name) + '" value="' + esc(d.port || '') + '" style="width:70px">';
+    }
+
+    // ---- Render devices ----
     function renderDevices(devices) {
         if (!devices || !devices.length) {
-            $devices.innerHTML = '<tr><td colspan="7"><em>No devices yet.</em></td></tr>';
+            $devices.innerHTML = '<tr><td colspan="9"><em>No devices yet.</em></td></tr>';
             return;
         }
         $devices.innerHTML = devices.map(function (d) {
@@ -160,13 +253,18 @@
             const toggleTitle = isEnabled
                 ? 'Enabled \u2014 click to disable (stops backups, keeps history)'
                 : 'Disabled \u2014 click to enable (resumes backups)';
+            const authCell = credentialOptions.length
+                ? credentialSelect(d)
+                : '<span class="text-muted">' + esc(d.credential || '-') + '</span>';
             return '<tr>' +
                 '<td>' + esc(d.name) + '</td>' +
                 '<td>' + esc(d.host) + '</td>' +
-                '<td>' + esc(d.port) + '</td>' +
-                '<td>' + esc(d.driver) + '</td>' +
+                '<td>' + portInput(d) + '</td>' +
+                '<td>' + driverSelect(d) + '</td>' +
+                '<td>' + transportSelect(d) + '</td>' +
+                '<td>' + authCell + '</td>' +
                 '<td>' + (d.group ? esc(d.group) : '-') + '</td>' +
-                '<td>' + label(d.enabled ? 'yes' : 'no', d.enabled ? 'success' : 'default') + '</td>' +
+                '<td>' + backupStatus(d) + '</td>' +
                 '<td><div class="btn-group btn-group-xs" role="group">' +
                     '<button class="btn btn-xs ' + toggleClass + '" data-action="toggle" data-name="' + n + '" title="' + toggleTitle + '"><i class="fa fa-power-off"></i></button>' +
                     '<button class="btn btn-xs btn-default" data-action="backup" data-name="' + n + '" title="Back up now"><i class="fa fa-download"></i></button>' +
@@ -175,28 +273,17 @@
                 '</div></td>' +
             '</tr>';
         }).join('');
+        // Activate tooltips for backup-status cells.
+        const tip = $devices.querySelectorAll('[data-toggle="tooltip"]');
+        [].forEach.call(tip, function (el) { $(el).tooltip(); });
     }
 
     async function loadDevices() {
         try {
             renderDevices(await api('GET', '/devices'));
         } catch (e) {
-            $devices.innerHTML = '<tr><td colspan="7"><em>Could not load devices.</em></td></tr>';
+            $devices.innerHTML = '<tr><td colspan="9"><em>Could not load devices.</em></td></tr>';
             alertBox('warning', e.message);
-        }
-    }
-
-    async function loadDrivers() {
-        try {
-            const drivers = await api('GET', '/drivers');
-            (drivers || []).forEach(function (drv) {
-                const opt = document.createElement('option');
-                opt.value = drv.name;
-                opt.textContent = drv.name;
-                $driver.appendChild(opt);
-            });
-        } catch (e) {
-            alertBox('warning', 'Could not load drivers: ' + e.message);
         }
     }
 
@@ -229,7 +316,11 @@
 
     async function loadCredentials() {
         try {
-            renderCredentials(await api('GET', '/credentials'));
+            const creds = await api('GET', '/credentials');
+            credentialOptions = creds || [];
+            renderCredentials(creds);
+            // Re-render devices so auth dropdowns populate.
+            loadDevices();
         } catch (e) {
             $credentials.innerHTML = '<tr><td colspan="6"><em>Could not load credentials.</em></td></tr>';
             alertBox('warning', e.message);
@@ -245,7 +336,8 @@
             const status = r.status || 'done';
             const detail = r.message || '';
             const kind = status === 'failed' ? 'danger' : 'success';
-            alertBox(kind, 'Backup of ' + name + ': ' + status + (detail ? ' — ' + detail : ''));
+            alertBox(kind, 'Backup of ' + name + ': ' + status + (detail ? ' \u2014 ' + detail : ''));
+            loadDevices();
         } catch (e) {
             alertBox('danger', 'Backup of ' + name + ' failed: ' + e.message);
         } finally {
@@ -254,9 +346,6 @@
         }
     }
 
-    // Fetch a binary blob (the history zip) and trigger a download without
-    // navigating away, so removal can follow it server-side. Identical to the
-    // helper used by the per-device Overview panel.
     async function downloadBlob(path, filename) {
         const res = await fetch(RUSTED.base + path, {
             method: 'GET',
@@ -280,8 +369,7 @@
         setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 1000);
     }
 
-    // Enable / disable (never delete) — a soft toggle that preserves the device's
-    // configuration history in rusted. Same action as the Overview panel.
+    // Enable / disable (never delete)
     async function doToggle(name, btn) {
         const isNowEnabled = btn.classList.contains('btn-success');
         try {
@@ -293,10 +381,7 @@
         }
     }
 
-    // Remove = a real delete from rusted. Since this erases the device, a full
-    // archive of every configuration revision is downloaded first (so it can be
-    // re-imported later if needed) before the device is deleted. Mirrors the
-    // Overview panel: the delete is skipped if the archive download fails.
+    // Remove = a real delete from rusted
     async function doRemove(name) {
         if (!confirm('Download a backup of all configurations and DELETE ' + name +
             ' from rusted?\n\nThis stops backups permanently and removes the device. ' +
@@ -322,8 +407,17 @@
         }
     }
 
-    // Event delegation for per-row action buttons. All four icons behave
-    // exactly like the per-device Overview panel controls.
+    // Inline edit: save a single field change immediately.
+    let editTimeouts = {};
+    async function doInlineEdit(name, field, value) {
+        try {
+            await api('PUT', '/devices/' + encodeURIComponent(name), { [field]: value });
+        } catch (e) {
+            alertBox('danger', 'Could not update ' + field + ' for ' + name + ': ' + e.message);
+        }
+    }
+
+    // Event delegation for per-row action buttons.
     $devices.addEventListener('click', function (e) {
         const btn = e.target.closest('button[data-action]');
         if (!btn) return;
@@ -333,6 +427,30 @@
         else if (action === 'backup') doBackup(name, btn);
         else if (action === 'history') window.location.href = DEVICE_VIEW + '/' + encodeURIComponent(name);
         else if (action === 'remove') doRemove(name);
+    });
+
+     // Event delegation for inline-edit inputs/selections inside device rows.
+    $devices.addEventListener('change', function (e) {
+        const el = e.target.closest('.rusted-edit');
+        if (!el) return;
+        const name = el.getAttribute('data-name');
+        const field = el.getAttribute('data-field');
+        let value;
+        if (el.tagName === 'SELECT') {
+            value = el.value;
+        } else if (el.type === 'number') {
+            value = el.value === '' ? null : parseInt(el.value, 10);
+        } else {
+            value = el.value;
+        }
+        // Clear any pending debounce.
+        if (editTimeouts[name + field]) clearTimeout(editTimeouts[name + field]);
+        // Immediate save for selects; debounced save for text inputs.
+        if (el.tagName === 'SELECT') {
+            doInlineEdit(name, field, value);
+        } else {
+            editTimeouts[name + field] = setTimeout(() => doInlineEdit(name, field, value), 500);
+        }
     });
 
     // Event delegation for credential remove buttons.
@@ -373,8 +491,9 @@
     });
 
     document.getElementById('rusted-refresh').addEventListener('click', function () {
-        loadDevices();
         loadCredentials();
+        loadDrivers();
+        loadTransports();
     });
 
     $form.addEventListener('submit', async function (e) {
@@ -389,20 +508,24 @@
         };
         const port = fd.get('port');
         if (port) payload.port = parseInt(port, 10);
+        const transport = fd.get('transport');
+        if (transport) payload.transport = transport;
         try {
             await api('POST', '/devices', payload);
             alertBox('success', 'Device ' + payload.name + ' added.');
             $form.reset();
+            $transport.selectedIndex = 0;
             loadDevices();
         } catch (e) {
             alertBox('danger', 'Add failed: ' + e.message);
         }
     });
 
-    // Initial load.
-    loadDrivers();
+    // Initial load. Credentials first (so auth dropdowns populate),
+    // then devices, drivers, transports.
     loadCredentials();
-    loadDevices();
+    loadDrivers();
+    loadTransports();
 })();
 </script>
 @endsection

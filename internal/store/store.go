@@ -45,6 +45,14 @@ type Device struct {
 	Enabled      bool
 	// Credential is populated by lookups that join (may be nil).
 	Credential *Credential
+	// LastBackup is the timestamp of the most recent backup run (nil if none).
+	// Populated by ListDevicesWithStatus.
+	LastBackup *time.Time
+	// LastStatus is the status of the most recent backup run ("success",
+	// "unchanged", "failed", or "" if no runs exist).
+	LastStatus string
+	// CredentialName is populated by ListDevicesWithStatus (LEFT JOIN).
+	CredentialName string
 }
 
 // BackupRun records the outcome of a single backup attempt.
@@ -312,6 +320,47 @@ func (s *Store) ListDevices() ([]*Device, error) {
 			return nil, err
 		}
 		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ListDevicesWithStatus is like ListDevices but also populates LastBackup and
+// LastStatus from the most recent backup run per device.
+func (s *Store) ListDevicesWithStatus() ([]*Device, error) {
+	rows, err := s.db.Query(`SELECT ` + deviceCols + `,
+		(SELECT r.started_at FROM backup_runs r WHERE r.device_id = d.id ORDER BY r.id DESC LIMIT 1),
+		(SELECT r.status FROM backup_runs r WHERE r.device_id = d.id ORDER BY r.id DESC LIMIT 1),
+		c.name
+		FROM devices d
+		LEFT JOIN credentials c ON c.id = d.credential_id
+		ORDER BY d.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Device
+	for rows.Next() {
+		var d Device
+		var lastAt sql.NullTime
+		var lastStatus sql.NullString
+		var credName sql.NullString
+		if err := rows.Scan(
+			&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport,
+			&d.CmdTimeout, &d.IdleTimeout, &d.CredentialID, &d.Group, &d.Enabled,
+			&lastAt, &lastStatus, &credName,
+		); err != nil {
+			return nil, err
+		}
+		if lastAt.Valid {
+			d.LastBackup = &lastAt.Time
+		}
+		if lastStatus.Valid {
+			d.LastStatus = lastStatus.String
+		}
+		if credName.Valid {
+			d.CredentialName = credName.String
+		}
+		out = append(out, &d)
 	}
 	return out, rows.Err()
 }

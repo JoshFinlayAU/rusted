@@ -178,7 +178,7 @@ var privilegedPromptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+#\s*$`)
 // not require enable at all) and the call succeeds.
 func (s *sshSession) elevate(enablePassword string) error {
 	_, _ = io.WriteString(s.stdin, "enable\n")
-	out := s.drain(s.readTimeout)
+	out, _ := s.drain(s.readTimeout)
 
 	if !passwordPrompt.MatchString(out) {
 		// No password prompt — either already privileged or enable isn't needed.
@@ -189,7 +189,7 @@ func (s *sshSession) elevate(enablePassword string) error {
 	}
 
 	_, _ = io.WriteString(s.stdin, enablePassword+"\n")
-	out = s.drain(s.readTimeout)
+	out, _ = s.drain(s.readTimeout)
 	if !privilegedPromptRe.MatchString(tail([]byte(out), 200)) {
 		return fmt.Errorf("did not reach privileged mode after enable")
 	}
@@ -225,8 +225,12 @@ func (s *sshSession) reader(r io.Reader) {
 }
 
 // drain reads output until the device prompt reappears at the tail of the
-// buffer, the stream goes idle for s.idle, or maxWait elapses.
-func (s *sshSession) drain(maxWait time.Duration) string {
+// buffer, the stream goes idle for s.idle without a prompt, or maxWait
+// elapses. Returns the captured output and a boolean indicating whether the
+// drain ended "incomplete" — either the hard timeout (maxWait) fired, or the
+// idle timer expired before a prompt was seen (meaning the command did not
+// complete, e.g. a large config with >s.idle pauses between bursts).
+func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
 	var buf bytes.Buffer
 	idle := time.NewTimer(s.idle)
 	defer idle.Stop()
@@ -236,7 +240,7 @@ func (s *sshSession) drain(maxWait time.Duration) string {
 		select {
 		case chunk, ok := <-s.out:
 			if !ok {
-				return buf.String()
+				return buf.String(), false
 			}
 			buf.Write(chunk)
 			if !idle.Stop() {
@@ -247,12 +251,14 @@ func (s *sshSession) drain(maxWait time.Duration) string {
 			}
 			idle.Reset(s.idle)
 			if promptRe.MatchString(tail(buf.Bytes(), 200)) {
-				return buf.String()
+				return buf.String(), false
 			}
 		case <-idle.C:
-			return buf.String()
+			// Idle without a prompt in the buffer means the command did not
+			// complete — treat as incomplete so the caller can report a timeout.
+			return buf.String(), true
 		case <-hard.C:
-			return buf.String()
+			return buf.String(), true
 		}
 	}
 }
@@ -267,7 +273,21 @@ func (s *sshSession) SendCommand(cmd string) (string, error) {
 	if _, err := io.WriteString(s.stdin, cmd+"\n"); err != nil {
 		return "", err
 	}
-	raw := s.drain(s.readTimeout)
+	raw, timedOut := s.drain(s.readTimeout)
+	// Even on timeout, check whether the device is waiting for an enable
+	// password (Cisco IOS prompts for one after "enable"). The idle timer
+	// fires while the device waits for input, so we must respond to the
+	// password prompt BEFORE reporting a timeout.
+	if s.enable != "" && passwordPrompt.MatchString(raw) {
+		raw = s.respondToEnablePrompt(raw)
+		if !promptRe.MatchString(tail([]byte(raw), 200)) {
+			return "", fmt.Errorf("command %q timed out after %s", cmd, s.readTimeout)
+		}
+		return cleanOutput(cmd, raw), nil
+	}
+	if timedOut {
+		return "", fmt.Errorf("command %q timed out after %s", cmd, s.readTimeout)
+	}
 	raw = s.respondToEnablePrompt(raw)
 	return cleanOutput(cmd, raw), nil
 }
@@ -285,7 +305,10 @@ func (s *sshSession) respondToEnablePrompt(raw string) string {
 	if _, err := io.WriteString(s.stdin, s.enable+"\n"); err != nil {
 		return raw
 	}
-	raw += s.drain(s.readTimeout)
+	raw += func() string {
+		s2, _ := s.drain(s.readTimeout)
+		return s2
+	}()
 	return raw
 }
 
@@ -343,8 +366,10 @@ func defaultCiphers() []string {
 const defaultCmdTimeout = 60 * time.Second
 
 // defaultIdleTimeout is the idle window after which a non-prompting stream is
-// considered complete. Raise it for devices that pause >700ms mid-output.
-const defaultIdleTimeout = 700 * time.Millisecond
+// considered incomplete. Network config dumps can have natural pauses >700 ms
+// between output bursts; 5 s accommodates large configs while still catching
+// truly hung sessions. Raise it further per-device with --idle-timeout.
+const defaultIdleTimeout = 5000 * time.Millisecond
 
 func cmdTimeout(t Target) time.Duration {
 	if t.CmdTimeout > 0 {

@@ -22,6 +22,7 @@ import (
 	"github.com/athenanetworks/rusted/internal/gitstore"
 	"github.com/athenanetworks/rusted/internal/provision"
 	"github.com/athenanetworks/rusted/internal/store"
+	"github.com/athenanetworks/rusted/internal/transport"
 )
 
 // Server holds dependencies for the HTTP API.
@@ -39,6 +40,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /api/drivers", s.listDrivers)
+	mux.HandleFunc("GET /api/transports", listTransports)
 	mux.HandleFunc("GET /api/credentials", s.listCredentials)
 	mux.HandleFunc("POST /api/credentials", s.createCredential)
 	mux.HandleFunc("DELETE /api/credentials/{name}", s.deleteCredential)
@@ -146,26 +148,39 @@ func (s *Server) deleteCredential(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// Transport names registered in the transport package. Sorted alphabetically
+// for stable output.
+func listTransports(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, transport.Names())
+}
+
 type deviceDTO struct {
-	Name       string `json:"name"`
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Driver     string `json:"driver"`
-	Transport  string `json:"transport"`
-	Credential string `json:"credential"`
-	Group      string `json:"group"`
-	Enabled    bool   `json:"enabled"`
+	Name           string     `json:"name"`
+	Host           string     `json:"host"`
+	Port           int        `json:"port"`
+	Driver         string     `json:"driver"`
+	Transport      string     `json:"transport"`
+	Credential     string     `json:"credential"`
+	Group          string     `json:"group"`
+	Enabled        bool       `json:"enabled"`
+	LastBackup     *time.Time `json:"last_backup"`  // null if no backup run exists
+	LastStatus     string     `json:"last_status"`  // "success"/"unchanged"/"failed"/""
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
-	devs, err := s.Store.ListDevices()
+	devs, err := s.Store.ListDevicesWithStatus()
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	out := make([]deviceDTO, 0, len(devs))
 	for _, d := range devs {
-		out = append(out, deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, "", d.Group, d.Enabled})
+		dto := deviceDTO{Name: d.Name, Host: d.Host, Port: d.Port,
+			Driver: d.Driver, Transport: d.Transport, Group: d.Group,
+			Enabled: d.Enabled, LastBackup: d.LastBackup, LastStatus: d.LastStatus,
+			Credential: d.CredentialName,
+		}
+		out = append(out, dto)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -176,7 +191,7 @@ func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	dto := deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, "", d.Group, d.Enabled}
+	dto := deviceDTO{Name: d.Name, Host: d.Host, Port: d.Port, Driver: d.Driver, Transport: d.Transport, Group: d.Group, Enabled: d.Enabled}
 	if d.Credential != nil {
 		dto.Credential = d.Credential.Name
 	}

@@ -8,6 +8,12 @@ the `rusted serve` HTTP API.
 
 - A **Rusted Backups** menu entry.
 - A single-page UI (no reloads) to **add and remove devices**.
+- **Inline editing** of device **driver**, **transport**, and **port** directly
+  in the table — changes are saved immediately with no separate edit form.
+- A **backup status** column on the Devices page showing at a glance whether each
+  device's config was backed up within the last 24 hours (green), is stale
+  (yellow), failed (red), or has never been backed up (grey). Hover for exact
+  timestamps and messages.
 - **Manage credentials in the web UI** — enter username/password/enable directly;
   they are sent once to rusted, encrypted at rest, and never returned to the
   browser.
@@ -26,7 +32,7 @@ the `rusted serve` HTTP API.
   add/disable stay put and are highlighted red.
 - **Trigger a backup on demand** with inline success/failure feedback.
 - A **Configuration Backups panel on every device's Overview page** showing the
-  last backup and exactly four icon-only buttons (hover for the label): an
+  last backup and exactly four icon buttons (hover for the label): an
   **Enabled toggle** (enable/disable — soft, history preserved), **Back up now**
   (runs a backup, surfaces any error), **Show history** (opens the configuration
   viewer — revisions + diff), and **Remove** (downloads every configuration
@@ -144,10 +150,34 @@ Open **Rusted Backups** from the main menu.
 
 ### The Devices page
 
-The main page lists every device rusted knows about. The **Enabled** column
-shows each device's state, and every row ends in the **same four icon buttons**
-as a device's Overview panel (hover for the label), all sharing the same
-behaviour:
+The main page lists every device rusted knows about. Each row in the table is
+**directly editable** — click into any **Driver**, **Transport**, or **Port** cell
+to change it; the change is saved immediately (debounced 500 ms for text inputs).
+A color-coded **Backup** column shows the last backup's status at a glance:
+
+| Icon | Meaning |
+|---|---|
+| Green check ✔ **UP TO DATE** | last run was **success** or **unchanged**, within the last 24 hours |
+| Grey question mark ? | last run was **success** or **unchanged**, but more than 24 hours ago (stale) |
+| Red triangle ⚠ **failed** | last backup run failed (tooltip shows the failure message) |
+| Grey circle ○ **never** | no backups have ever been recorded |
+
+Hover any icon for the exact timestamp and message. The **Enabled** state of each
+device is shown only via the toggle button in the **Actions** column (see below):
+
+| Column | What it shows | Editable? |
+|---|---|---|
+| Name | device name | no |
+| Host | hostname/IP | no |
+| Port | management port | **yes** (inline number input) |
+| Driver | platform driver | **yes** (inline dropdown) |
+| Transport | ssh / telnet / ssh-exec / etc. | **yes** (inline dropdown) |
+| Auth | credential name | **yes** (inline dropdown) |
+| Group | backup sub-directory | no |
+| Backup | last run status + timestamp | no (tooltip details) |
+| Actions | enable/disable, backup, history, delete | — |
+
+Every row ends in the **four icon buttons**:
 
 | Button | Does |
 |---|---|
@@ -232,9 +262,10 @@ receiver (all `web`+`auth`+CSRF protected):
 
 | Method & path | Relays to rusted |
 |---|---|
-| `GET plugin/rusted/api/devices` | `GET /api/devices` |
+| `GET plugin/rusted/api/devices` | `GET /api/devices` (includes `last_backup` and `last_status` per device) |
 | `GET plugin/rusted/api/devices/{name}` | `GET /api/devices/{name}` |
-| `POST plugin/rusted/api/devices` | `POST /api/devices` |
+| `POST plugin/rusted/api/devices` | `POST /api/devices` (create) |
+| `PUT plugin/rusted/api/devices/{name}` | partial update (GET current, merge, POST upsert) — used for inline Driver/Transport/Port edits |
 | `DELETE plugin/rusted/api/devices/{name}` | `DELETE /api/devices/{name}` |
 | `POST plugin/rusted/api/devices/{name}/backup` | `POST /api/devices/{name}/backup` |
 | `GET plugin/rusted/api/devices/{name}/history` | `GET /api/devices/{name}/history` |
@@ -243,10 +274,11 @@ receiver (all `web`+`auth`+CSRF protected):
 | `GET plugin/rusted/api/devices/{name}/versions` | `GET /api/devices/{name}/versions` (revision list) |
 | `GET plugin/rusted/api/devices/{name}/config?commit=<hash>` | `GET /api/devices/{name}/config` — latest, or `?commit=` for a revision (**text/plain**) |
 | `GET plugin/rusted/api/devices/{name}/diff?from=<a>&to=<b>` | `GET /api/devices/{name}/diff` — unified diff (`from` alone = that revision's change; `from`+`to` = between two) (**text/plain**) |
+| `GET plugin/rusted/api/drivers` | `GET /api/drivers` (populates the Driver dropdown) |
+| `GET plugin/rusted/api/transports` | `GET /api/transports` (populates the Transport dropdown) |
 | `GET plugin/rusted/api/credentials` | `GET /api/credentials` |
 | `POST plugin/rusted/api/credentials` | `POST /api/credentials` |
 | `DELETE plugin/rusted/api/credentials/{name}` | `DELETE /api/credentials/{name}` |
-| `GET plugin/rusted/api/drivers` | `GET /api/drivers` |
 | `GET plugin/rusted/api/sync/state` | joins LibreNMS devices with rusted → `{left, right, grey}` |
 | `POST plugin/rusted/api/sync/add` | batches `POST /api/devices` (single driver + credential, per family) |
 | `POST plugin/rusted/api/sync/disable` | sets `enabled=false` per device (history preserved) |

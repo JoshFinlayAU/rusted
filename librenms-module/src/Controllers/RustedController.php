@@ -33,6 +33,11 @@ class RustedController extends Controller
         return $this->proxy(fn () => RustedClient::client()->get('/api/drivers'));
     }
 
+    public function apiTransports(): JsonResponse
+    {
+        return $this->proxy(fn () => RustedClient::client()->get('/api/transports'));
+    }
+
     public function apiCredentials(): JsonResponse
     {
         return $this->proxy(fn () => RustedClient::client()->get('/api/credentials'));
@@ -69,7 +74,14 @@ class RustedController extends Controller
             'driver' => 'required|string',
             'credential' => 'required|string',
             'group' => 'nullable|string',
+            'transport' => 'nullable|string',
         ]);
+
+        // Cast port to int: the browser sends a string from <input type="number">,
+        // and Go's json.Decoder rejects JSON string → int.
+        if (isset($data['port'])) {
+            $data['port'] = (int) $data['port'];
+        }
 
         return $this->proxy(fn () => RustedClient::client()->post('/api/devices', $data));
     }
@@ -113,6 +125,62 @@ class RustedController extends Controller
             'credential' => $e['credential'] ?? '',
             'group'      => $e['group'] ?? '',
             'enabled'    => $enabled,
+        ];
+
+        try {
+            $r = RustedClient::client()->post('/api/devices', $payload);
+        } catch (\Throwable $ex) {
+            return response()->json(['error' => 'Could not reach the rusted API: '.$ex->getMessage()], 502);
+        }
+
+        return $this->proxy(fn () => $r);
+    }
+
+    /**
+     * Partially update a device (driver, port, transport, etc.) via rusted's
+     * upsert POST endpoint.  The browser sends only the fields to change; this
+     * method fetches the current device, merges in the patches, and POSTs the
+     * full record back so rusted upserts in place.
+     *
+     * Body: any subset of {"driver","port","transport","host","group","credential"}
+     */
+    public function apiUpdateDevice(string $name, Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'driver'     => 'nullable|string',
+            'port'       => 'nullable|integer',
+            'transport'  => 'nullable|string',
+            'host'       => 'nullable|string',
+            'group'      => 'nullable|string',
+            'credential' => 'nullable|string',
+        ]);
+
+        try {
+            $g = RustedClient::client()->get('/api/devices/'.rawurlencode($name));
+        } catch (\Throwable $e) {
+            return response()->json(['error' => 'Could not reach the rusted API: '.$e->getMessage()], 502);
+        }
+
+        if (! $g->successful()) {
+            return response()->json($g->json() ?? ['error' => 'HTTP '.$g->status()], $g->status() ?: 502);
+        }
+
+        $e = $g->json();
+        // Cast port to int: the browser sends a string from <input type="number">,
+        // and Go's json.Decoder rejects JSON string → int.
+        $port = $data['port'] ?? null;
+        if ($port !== null) {
+            $port = (int) $data['port'];
+        }
+        $payload = [
+            'name'       => $e['name'] ?? $name,
+            'host'       => $data['host'] ?? ($e['host'] ?? $name),
+            'port'       => $port ?? ($e['port'] ?? 0),
+            'driver'     => $data['driver'] ?? ($e['driver'] ?? ''),
+            'transport'  => $data['transport'] ?? ($e['transport'] ?? ''),
+            'credential' => $data['credential'] ?? ($e['credential'] ?? ''),
+            'group'      => $data['group'] ?? ($e['group'] ?? ''),
+            'enabled'    => $e['enabled'] ?? true,
         ];
 
         try {

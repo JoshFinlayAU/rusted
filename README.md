@@ -168,17 +168,22 @@ All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
 
 | Method & path | Description |
 |---|---|
-| `GET /api/devices` | List devices |
-| `POST /api/devices` | Add a device (JSON) |
+| `GET /api/devices` | List devices (includes `last_backup` timestamp + `last_status` of the most recent run) |
+| `POST /api/devices` | Add or re-register a device (JSON; upsert on name) |
 | `GET /api/devices/{name}` | Device detail |
 | `DELETE /api/devices/{name}` | Remove a device |
-| `GET /api/devices/{name}/history` | Backup history |
+| `GET /api/devices/{name}/history` | Backup history (50 most recent runs) |
 | `GET /api/devices/{name}/config` | Latest stored config (text) |
 | `POST /api/devices/{name}/backup` | Trigger a backup now |
 | `GET /api/credentials` | List credentials (no secrets returned) |
 | `POST /api/credentials` | Add a credential (name, username, password, enable) |
 | `DELETE /api/credentials/{name}` | Remove a credential |
-| `GET /api/drivers` | List drivers |
+| `GET /api/drivers` | List platform drivers |
+| `GET /api/transports` | List registered transports (e.g. `ssh`, `telnet`, `ssh-exec`) |
+
+The device `GET /api/devices` and `GET /api/devices/{name}` endpoints return
+`last_backup` (RFC 3339 timestamp of the most recent backup run, or `null` if none)
+and `last_status` (`"success"`, `"unchanged"`, `"failed"`, or `""` if no runs exist).
 
 The credential `GET` only reports whether a password/key/enable is set — it never
 returns secret material.
@@ -203,6 +208,23 @@ When a backup fails, rusted prints the failure reason to **stderr** (even withou
 ```
 FAIL core-sw1: connect: dial tcp 10.0.0.1:23: connection refused
 FAIL edge-fw: init command "enable": Password: prompt but no enable password
+FAIL ios-1: config command "show running-config": command "show running-config" timed out after 60s
+```
+
+**Timeouts** are detected in two ways:
+
+- **Hard timeout** — the command runs longer than `--cmd-timeout` (default 60 s).
+- **Idle timeout** — the device stops sending for `--idle-timeout` (default 5 s)
+  *without* returning to a prompt, indicating the command did not complete
+  (e.g. a large `show running-config` with natural pauses between bursts).
+
+Both produce `command %q timed out after %s`, so you see a clear timeout
+instead of the misleading "captured empty configuration". To fix, raise the
+per-device `--cmd-timeout` (for slow devices) or `--idle-timeout` (for devices
+that pause mid-output):
+
+```sh
+rusted device update slow-sw --cmd-timeout 180 --idle-timeout 10000
 ```
 
 For real-time progress on a long run, use `--verbose` (`-v`):
@@ -299,18 +321,18 @@ Run it once by hand to verify: `sudo systemctl start rusted-backup.service`.
 
 Network devices vary widely in how fast they emit output. rusted exposes two
 per-device timeout overrides that override the engine-wide defaults (60s command
-timeout, 700ms idle window):
+timeout, 5s idle window):
 
 | Flag | Stored as | Default | When to raise it |
 |---|---|---|---|
 | `--cmd-timeout SECONDS` | `cmd_timeout` | 60 | Large configs on slow CPUs that take >60s to dump |
-| `--idle-timeout MILLISECONDS` | `idle_timeout` | 700 | Devices that pause >700ms between output lines, causing premature truncation |
+| `--idle-timeout MILLISECONDS` | `idle_timeout` | 5000 | Devices that pause >5s between output bursts, causing premature truncation |
 
 Example:
 
 ```sh
 rusted device add legacy-sw --host 10.0.0.5 -d cisco_ios -c lab --transport ssh \
-  --cmd-timeout 180 --idle-timeout 3000
+  --cmd-timeout 180 --idle-timeout 10000
 ```
 
 These are also available on `rusted device update`. Use `rusted device list` to
