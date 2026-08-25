@@ -41,6 +41,15 @@ type Driver struct {
 	// ENCRYPTED PRIVATE KEY-----\" changes wholesale each dump. Skipped by
 	// --raw like Strip.
 	StripBlocks []*BlockStrip
+	// BinarySafe marks drivers whose Config commands emit byte-exact output:
+	// the engine then runs them over an exec transport with output
+	// normalisation disabled (Target.RawOutput), so binary payloads survive.
+	BinarySafe bool
+	// PostProcess, when non-nil, rewrites the raw captured output BEFORE
+	// Clean — used to do driver-side formatting that would otherwise need
+	// applets on the device (e.g. OpenWrt encodes binary files as base64 in
+	// Go instead of relying on od/base64 on busybox).
+	PostProcess func(raw string) string
 	// RawNormalize, when true, disables the generic dynamic-string normaliser
 	// (timestamp/date/uptime masking). Leave false unless a platform's config
 	// is corrupted by masking.
@@ -256,6 +265,27 @@ func builtins() []Driver {
 			Description: "VyOS / Vyatta",
 			Init:        []string{"set terminal length 0"},
 			Config:      []string{"show configuration commands"},
+		},
+		{
+			Name:        "openwrt",
+			Description: "OpenWrt (/etc/config files + /etc/sysupgrade.conf entries; binaries as base64)",
+			// Capture over the exec channel (no PTY): stdout is byte-exact, so
+			// binary files survive the trip and the driver can base64 them
+			// itself (BinarySafe disables transport output normalisation).
+			Transport:  "ssh-exec",
+			BinarySafe: true,
+			// The device side uses ONLY ash builtins (for/case/read/test/echo)
+			// plus cat — no od, find, sort, sed, head or base64 applets, which
+			// are not guaranteed in every busybox build. All formatting
+			// happens in postProcessOpenWRT on the rusted side.
+			Config: []string{
+				`for f in /etc/config/*; do [ -f "$f" ] && { echo; echo "## $f"; cat "$f"; }; done`,
+				`w(){ for e in "$1"/*; do if [ -f "$e" ]; then echo; echo "## $e"; cat "$e"; elif [ -d "$e" ]; then w "$e"; fi; done; }; if [ -f /etc/sysupgrade.conf ]; then echo; echo "## /etc/sysupgrade.conf"; cat /etc/sysupgrade.conf; while read p; do case "$p" in ''|\#*) continue ;; esac; p="${p%/}"; for e in $p; do if [ -f "$e" ]; then echo; echo "## $e"; cat "$e"; elif [ -d "$e" ]; then w "$e"; fi; done; done < /etc/sysupgrade.conf; fi; exit 0`,
+			},
+			PostProcess: postProcessOpenWRT,
+			// Ignore lists are intentionally empty for now: nothing on a stock
+			// OpenWrt is volatile enough to strip. Add Strip/StripBlocks rules
+			// here when real-world noise shows up.
 		},
 		{
 			Name:        "fortinet",

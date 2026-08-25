@@ -41,7 +41,7 @@ Officially supported (per the project spec):
 - **Juniper Junos** — `juniper_junos`
 
 Also bundled: `cisco_ios` (with enable-mode escalation), `cisco_asa`, `arista_eos`,
-`fortinet`, `vyos`, `generic`. Run `rusted driver list` to see them all.
+`fortinet`, `openwrt`, `vyos`, `generic`. Run `rusted driver list` to see them all.
 
 ## Install
 

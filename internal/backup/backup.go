@@ -136,6 +136,7 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 		Enable:     dev.Credential.Enable,
 		Timeout:    e.Timeout,
 		Debug:      e.Debug,
+		RawOutput:  drv.BinarySafe, // byte-exact capture for post-processing drivers
 	}
 	if dev.CmdTimeout > 0 {
 		tgt.CmdTimeout = time.Duration(dev.CmdTimeout) * time.Second
@@ -170,17 +171,24 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 			return finish("failed", fmt.Sprintf("config command %q: %v", c, err), "", 0)
 		}
 		buf.WriteString(out)
-		if !strings.HasSuffix(out, "\n") {
+		// Framing newline between commands — but never for BinarySafe
+		// drivers, where a missing trailing newline may be part of the file
+		// content and post-processing needs the bytes untouched.
+		if !drv.BinarySafe && !strings.HasSuffix(out, "\n") {
 			buf.WriteByte('\n')
 		}
 	}
 
+	raw := buf.String()
+	if drv.PostProcess != nil {
+		raw = drv.PostProcess(raw)
+	}
 	var clean string
 	if e.Raw {
 		e.logf("  raw mode: skipping volatile-line stripping and masking\n")
-		clean = drv.CleanRaw(buf.String())
+		clean = drv.CleanRaw(raw)
 	} else {
-		clean = drv.Clean(buf.String())
+		clean = drv.Clean(raw)
 	}
 	if strings.TrimSpace(clean) == "" {
 		e.logf("  captured empty configuration\n")

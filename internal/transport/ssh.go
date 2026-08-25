@@ -26,10 +26,11 @@ func (*SSH) Name() string { return "ssh" }
 
 // promptRe matches a typical network-device shell prompt at the end of the
 // captured buffer: a hostname-like token followed by one of > # $ and optional
-// trailing whitespace. It covers bracketed prompts too, e.g. MikroTik's
-// "[admin@router] >". It is deliberately permissive; the idle-timeout in
-// drain() is the real safety net.
-var promptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+[#>$]\s*$`)
+// trailing whitespace. It covers bracketed prompts too (MikroTik's
+// "[admin@router] >") and Linux-style ones with the home directory
+// ("root@openwrt:~#", dropbear/busybox ash). It is deliberately permissive;
+// bare-trailing-prompt anchoring (trailingMatches) is the real gate.
+var promptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ~]+[#>$]\s*$`)
 
 // morePromptRe detects pager prompts like "--More--" or " -- More --" that some
 // devices emit when output exceeds one screen. When seen, drain() sends a
@@ -176,8 +177,9 @@ var usernamePrompt = regexp.MustCompile(`(?i)(u?ser ?name|log ?in)[:\s]*$`)
 var passwordPrompt = regexp.MustCompile(`(?i)pass(word|phrase):\s*$`)
 
 // privilegedPromptRe matches a prompt ending in "#" (Cisco IOS/NX-OS/ASA
-// enable mode), as opposed to ">" (user exec) or "$" (shells).
-var privilegedPromptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+#\s*$`)
+// enable mode, Linux root shells like "root@openwrt:~#"), as opposed to ">"
+// (user exec) or "$" (shells).
+var privilegedPromptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ~]+#\s*$`)
 
 // elevate sends "enable" and the privileged-mode password, then waits for the
 // device to land in enable mode (prompts ending in "#"). If the device does not

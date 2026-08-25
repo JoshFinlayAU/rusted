@@ -69,13 +69,43 @@ project spec are:
 | `juniper_junos`     | Juniper Junos          | `show configuration | display set` |
 
 Additional drivers (`cisco_ios`, `cisco_asa`, `arista_eos`, `fortinet`,
-`vyos`, `generic`) ship as well.
+`openwrt`, `vyos`, `generic`) ship as well.
 
 > MikroTik note: RouterOS won't return a full config over the binary API (`/export`
 > yields nothing over the API, and `/file` reads are capped at ~4KB). So MikroTik is
 > backed up over **SSH** with the `mikrotik_routeros` driver. If SSH auth is a problem,
 > `POST /api/provision/mikrotik-ssh-key` installs a generated key over the API and hands
 > back the private key to back up with (see internal/provision).
+
+## OpenWrt
+
+OpenWrt is a Linux distribution: there is no `show running-config`, the
+configuration *is* the filesystem. The driver captures over **ssh-exec**
+(byte-exact, no PTY) and keeps the device side deliberately minimal:
+
+- **Only ash builtins (`for/case/read/test/echo`) plus `cat` are used** — no
+  `od`, `find`, `sort`, `sed`, `head` or `base64`, which are not guaranteed to
+  exist in every busybox build. All formatting happens on the rusted side
+  (`PostProcess`), including binary detection and base64 encoding via the Go
+  standard library.
+- Two commands run on the device, each file introduced by a `## <path>` marker:
+  1. every `/etc/config/*` file (the UCI configuration);
+  2. `/etc/sysupgrade.conf` itself, then each non-comment entry expanded:
+     plain files (`/etc/init.d/connection_monitor`), shell globs
+     (`/root/scripts/*`) and directories (`/etc/openvpn/`, trailing slash
+     optional) resolved recursively by a small shell function. Entries that do
+     not exist are skipped silently.
+- Sections whose first 4 KiB contain a NUL byte are considered **binary** and
+  stored as base64 of the exact received bytes (marker
+  `## binary file, base64 follows`), keeping the whole backup text-only,
+  byte-faithful and diff-stable.
+
+Because capture is byte-exact, ordering is stable across runs (shell glob
+order is alphabetical per directory; entries are processed in manifest order).
+
+The driver's `Strip`/`StripBlocks` lists are intentionally empty — nothing on a
+stock OpenWrt is volatile enough to strip. Add rules only when real-world noise
+shows up.
 
 ## Cambium (drafts)
 

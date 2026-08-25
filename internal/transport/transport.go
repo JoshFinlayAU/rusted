@@ -39,6 +39,11 @@ type Target struct {
 	// Debug, when non-nil, receives every raw byte read from and written to
 	// the device, prefixed with <<< and >>> respectively. Set by --debug (-vv).
 	Debug io.Writer
+	// RawOutput disables the transport's output normalisation (CRLF folding,
+	// ANSI stripping). Set for drivers whose capture must stay byte-exact —
+	// e.g. OpenWrt, which pulls binary files over the exec channel and lets
+	// the driver post-process them.
+	RawOutput bool
 }
 
 // Session is an open interactive connection to a device.
