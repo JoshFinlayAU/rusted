@@ -227,6 +227,10 @@ that pause mid-output):
 rusted device update slow-sw --cmd-timeout 180 --idle-timeout 10000
 ```
 
+**Pagination** (`--More--`) is handled automatically: when a device emits a
+pager prompt, the transport sends a space to advance past it without treating
+it as a timeout. This works for both SSH and telnet.
+
 For real-time progress on a long run, use `--verbose` (`-v`):
 
 ```
@@ -240,6 +244,36 @@ rusted backup run core-sw1 -v
   init commands ok, collecting config (1 command(s))
   captured 4240 bytes, saving to git...
 ```
+
+For full diagnostic output including raw device I/O (every command sent and
+every byte received), use `--debug`:
+
+```
+rusted backup run core-sw1 --debug
+```
+
+```
+=== core-sw1 [10.0.0.1:cisco_ios] ===
+  using transport "ssh", driver "cisco_ios"
+  connected, running 3 init command(s)
+>>> enable
+<<< Password:
+>>> [enable password]
+<<< core-sw1#
+>>> terminal length 0
+<<< core-sw1#
+>>> terminal width 0
+<<< core-sw1#
+>>> show running-config
+<<< Building configuration...
+<<< version 12.2
+<<< ...
+<<< 4240 bytes captured
+  captured 4240 bytes, saving to git...
+```
+
+Lines prefixed `>>>` are commands sent to the device; `<<<` are responses
+received. Secrets (enable passwords) are masked as `[enable password]`.
 
 Use `rusted backup history NAME` to see the full recorded message for any past
 run (including failures).

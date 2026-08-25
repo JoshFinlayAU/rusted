@@ -31,6 +31,11 @@ func (*SSH) Name() string { return "ssh" }
 // drain() is the real safety net.
 var promptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+[#>$]\s*$`)
 
+// morePromptRe detects pager prompts like "--More--" or " -- More --" that some
+// devices emit when output exceeds one screen. When seen, drain() sends a
+// space to advance past the prompt.
+var morePromptRe = regexp.MustCompile(`(?i)--?\s*[Mm]ore\s*--?`)
+
 // ansiRe matches ANSI/VT100 escape sequences. Some platforms (notably MikroTik
 // RouterOS) colourise their CLI even over a programmatic session.
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -140,6 +145,7 @@ func (*SSH) Dial(ctx context.Context, t Target) (Session, error) {
 		idle:        idleTimeout(t),
 		readTimeout: cmdTimeout(t),
 		enable:      t.Enable,
+		debug:       t.Debug,
 	}
 	go s.reader(stdout)
 
@@ -177,6 +183,7 @@ var privilegedPromptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+#\s*$`)
 // prompt for a password, it is assumed to already be in enable mode (or does
 // not require enable at all) and the call succeeds.
 func (s *sshSession) elevate(enablePassword string) error {
+	s.debugf(">>> enable\n")
 	_, _ = io.WriteString(s.stdin, "enable\n")
 	out, _ := s.drain(s.readTimeout)
 
@@ -188,6 +195,7 @@ func (s *sshSession) elevate(enablePassword string) error {
 		return nil
 	}
 
+	s.debugf(">>> [enable password]\n")
 	_, _ = io.WriteString(s.stdin, enablePassword+"\n")
 	out, _ = s.drain(s.readTimeout)
 	if !privilegedPromptRe.MatchString(tail([]byte(out), 200)) {
@@ -205,6 +213,13 @@ type sshSession struct {
 	idle        time.Duration
 	readTimeout time.Duration
 	enable      string
+	debug       io.Writer
+}
+
+func (s *sshSession) debugf(format string, args ...any) {
+	if s.debug != nil {
+		fmt.Fprintf(s.debug, format, args...)
+	}
 }
 
 func (s *sshSession) reader(r io.Reader) {
@@ -214,6 +229,7 @@ func (s *sshSession) reader(r io.Reader) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
+			s.debugf("<<< %s", string(chunk))
 			s.out <- chunk
 		}
 		if err != nil {
@@ -225,13 +241,19 @@ func (s *sshSession) reader(r io.Reader) {
 }
 
 // drain reads output until the device prompt reappears at the tail of the
-// buffer, the stream goes idle for s.idle without a prompt, or maxWait
-// elapses. Returns the captured output and a boolean indicating whether the
-// drain ended "incomplete" — either the hard timeout (maxWait) fired, or the
-// idle timer expired before a prompt was seen (meaning the command did not
-// complete, e.g. a large config with >s.idle pauses between bursts).
+// buffer, the stream goes idle for s.idle, or maxWait elapses.
+//
+// Returns (output, true) "incomplete" only when the hard timeout fired.
+// When the idle timer fires:
+//   - If a Password: prompt was seen, return "complete" (false) so the
+//     caller can respond to it.
+//   - If no data was ever received, return "incomplete" (true) — truly hung.
+//   - If data WAS received (device pausing between bursts on a large dump),
+//     reset the idle timer and keep draining — only the hard timeout can
+//     terminate this state.
 func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
 	var buf bytes.Buffer
+	hasData := false
 	idle := time.NewTimer(s.idle)
 	defer idle.Stop()
 	hard := time.NewTimer(maxWait)
@@ -242,6 +264,7 @@ func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
 			if !ok {
 				return buf.String(), false
 			}
+			hasData = true
 			buf.Write(chunk)
 			if !idle.Stop() {
 				select {
@@ -250,13 +273,32 @@ func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
 				}
 			}
 			idle.Reset(s.idle)
+			// Detect a pager prompt like "--More--" and send space to
+			// advance past it.
+			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+				s.debugf(">>> [space]\n")
+				_, _ = io.WriteString(s.stdin, " ")
+				// Keep the current idle but note we responded.
+			}
 			if promptRe.MatchString(tail(buf.Bytes(), 200)) {
 				return buf.String(), false
 			}
 		case <-idle.C:
-			// Idle without a prompt in the buffer means the command did not
-			// complete — treat as incomplete so the caller can report a timeout.
-			return buf.String(), true
+			// Device may be waiting for a password (e.g. after "enable").
+			if passwordPrompt.MatchString(buf.String()) {
+				return buf.String(), false
+			}
+			// Device may be waiting at a pager prompt.
+			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+				s.debugf(">>> [space]\n")
+				_, _ = io.WriteString(s.stdin, " ")
+				idle.Reset(s.idle)
+				continue
+			}
+			if !hasData {
+				return buf.String(), true
+			}
+			idle.Reset(s.idle)
 		case <-hard.C:
 			return buf.String(), true
 		}
@@ -270,6 +312,7 @@ func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
 // IOS), SendCommand automatically sends Target.Enable and reads the follow-up
 // output.
 func (s *sshSession) SendCommand(cmd string) (string, error) {
+	s.debugf(">>> %s\n", cmd)
 	if _, err := io.WriteString(s.stdin, cmd+"\n"); err != nil {
 		return "", err
 	}
@@ -302,6 +345,7 @@ func (s *sshSession) respondToEnablePrompt(raw string) string {
 	if !passwordPrompt.MatchString(raw) {
 		return raw
 	}
+	s.debugf(">>> [enable password]\n")
 	if _, err := io.WriteString(s.stdin, s.enable+"\n"); err != nil {
 		return raw
 	}

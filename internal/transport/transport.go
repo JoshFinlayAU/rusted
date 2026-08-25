@@ -9,6 +9,7 @@ package transport
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
@@ -16,14 +17,14 @@ import (
 
 // Target describes how and with what credentials to reach a device.
 type Target struct {
-	Name       string
-	Host       string
-	Port       int
-	Username   string
-	Password   string
-	PrivateKey []byte // optional PEM private key
-	Enable     string // optional privileged-mode password
-	Timeout    time.Duration // dial/connect timeout (SSH handshake, TCP connect)
+	Name        string
+	Host        string
+	Port        int
+	Username    string
+	Password    string
+	PrivateKey  []byte // optional PEM private key
+	Enable      string // optional privileged-mode password
+	Timeout     time.Duration // dial/connect timeout (SSH handshake, TCP connect)
 	// CmdTimeout is the hard timeout for a single SendCommand call. Zero means
 	// the engine default (60s). Override for slow devices that take longer to
 	// emit their full config.
@@ -32,6 +33,9 @@ type Target struct {
 	// considered complete (default 700ms). Increase for devices that pause
 	// mid-output for longer than 700ms.
 	IdleTimeout time.Duration
+	// Debug, when non-nil, receives every raw byte read from and written to
+	// the device, prefixed with <<< and >>> respectively. Set by --debug (-vv).
+	Debug io.Writer
 }
 
 // Session is an open interactive connection to a device.

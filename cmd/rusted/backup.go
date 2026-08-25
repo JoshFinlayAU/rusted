@@ -20,7 +20,7 @@ func backupCmd() *cobra.Command {
 }
 
 func backupRunCmd() *cobra.Command {
-	var all, verbose bool
+	var all, verbose, debug bool
 	cmd := &cobra.Command{
 		Use:   "run [NAME]",
 		Short: "Back up a device (or --all enabled devices)",
@@ -38,8 +38,11 @@ func backupRunCmd() *cobra.Command {
 				return err
 			}
 			eng := backup.New(st, gs)
-			if verbose {
+			if verbose || debug {
 				eng.Log = os.Stderr
+			}
+			if debug {
+				eng.Debug = os.Stderr
 			}
 			ctx := context.Background()
 
@@ -81,6 +84,7 @@ func backupRunCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "back up all enabled devices")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print progress to stderr")
+	cmd.Flags().BoolVar(&debug, "debug", false, "print raw device I/O to stderr (implies -v)")
 	return cmd
 }
 

@@ -23,6 +23,7 @@ type Engine struct {
 	Transport string        // transport name, default "ssh"
 	Timeout   time.Duration // per-device connect timeout
 	Log       io.Writer     // verbose progress output (nil = silent)
+	Debug     io.Writer     // raw I/O debug output (nil = silent; set by --debug/-vv)
 }
 
 // New builds an Engine with sensible defaults.
@@ -131,6 +132,7 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 		PrivateKey:  []byte(dev.Credential.PrivateKey),
 		Enable:      dev.Credential.Enable,
 		Timeout:     e.Timeout,
+		Debug:       e.Debug,
 	}
 	if dev.CmdTimeout > 0 {
 		tgt.CmdTimeout = time.Duration(dev.CmdTimeout) * time.Second

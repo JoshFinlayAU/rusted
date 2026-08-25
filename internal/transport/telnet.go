@@ -43,6 +43,7 @@ func (*Telnet) Dial(ctx context.Context, t Target) (Session, error) {
 		idle:        idleTimeout(t),
 		readTimeout: cmdTimeout(t),
 		enable:      t.Enable,
+		debug:       t.Debug,
 	}
 	go s.reader()
 
@@ -103,6 +104,7 @@ func (s *telnetSession) login(username, password string) error {
 
 			if loginStage == 0 && passwordPrompt.MatchString(text) && password != "" {
 				// Device asked for a password directly (no username prompt).
+				s.debugf(">>> %s\n", password)
 				if _, err := io.WriteString(s.conn, password+"\r\n"); err != nil {
 					return err
 				}
@@ -116,6 +118,7 @@ func (s *telnetSession) login(username, password string) error {
 				}
 				idle.Reset(loginIdle)
 			} else if loginStage == 0 && usernamePrompt.MatchString(text) && username != "" {
+				s.debugf(">>> %s\n", username)
 				if _, err := io.WriteString(s.conn, username+"\r\n"); err != nil {
 					return err
 				}
@@ -129,6 +132,7 @@ func (s *telnetSession) login(username, password string) error {
 				}
 				idle.Reset(loginIdle)
 			} else if loginStage >= 1 && passwordPrompt.MatchString(text) && password != "" {
+				s.debugf(">>> %s\n", password)
 				if _, err := io.WriteString(s.conn, password+"\r\n"); err != nil {
 					return err
 				}
@@ -183,6 +187,13 @@ type telnetSession struct {
 	idle        time.Duration
 	readTimeout time.Duration
 	enable      string
+	debug       io.Writer
+}
+
+func (s *telnetSession) debugf(format string, args ...any) {
+	if s.debug != nil {
+		fmt.Fprintf(s.debug, format, args...)
+	}
 }
 
 func (s *telnetSession) reader() {
@@ -192,6 +203,7 @@ func (s *telnetSession) reader() {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
+			s.debugf("<<< %s", string(chunk))
 			s.out <- chunk
 		}
 		if err != nil {
@@ -211,6 +223,7 @@ func (s *telnetSession) reader() {
 // >s.idle pauses between bursts).
 func (s *telnetSession) drain(maxWait time.Duration) (string, bool) {
 	var buf bytes.Buffer
+	hasData := false
 	idle := time.NewTimer(s.idle)
 	defer idle.Stop()
 	hard := time.NewTimer(maxWait)
@@ -221,6 +234,7 @@ func (s *telnetSession) drain(maxWait time.Duration) (string, bool) {
 			if !ok {
 				return buf.String(), false
 			}
+			hasData = true
 			buf.Write(chunk)
 			if !idle.Stop() {
 				select {
@@ -229,13 +243,27 @@ func (s *telnetSession) drain(maxWait time.Duration) (string, bool) {
 				}
 			}
 			idle.Reset(s.idle)
+			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+				s.debugf(">>> [space]\n")
+				_, _ = io.WriteString(s.conn, " ")
+			}
 			if promptRe.MatchString(tail(buf.Bytes(), 200)) {
 				return buf.String(), false
 			}
 		case <-idle.C:
-			// Idle without a prompt in the buffer means the command did not
-			// complete — treat as incomplete so the caller can report a timeout.
-			return buf.String(), true
+			if passwordPrompt.MatchString(buf.String()) {
+				return buf.String(), false
+			}
+			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+				s.debugf(">>> [space]\n")
+				_, _ = io.WriteString(s.conn, " ")
+				idle.Reset(s.idle)
+				continue
+			}
+			if !hasData {
+				return buf.String(), true
+			}
+			idle.Reset(s.idle)
 		case <-hard.C:
 			return buf.String(), true
 		}
@@ -249,6 +277,7 @@ func (s *telnetSession) drain(maxWait time.Duration) (string, bool) {
 // "enable" to enter privileged mode on Cisco IOS), SendCommand automatically sends
 // Target.Enable and reads the follow-up output.
 func (s *telnetSession) SendCommand(cmd string) (string, error) {
+	s.debugf(">>> %s\n", cmd)
 	deadline := time.Now().Add(s.readTimeout)
 	if err := s.conn.SetWriteDeadline(deadline); err != nil {
 		return "", err
@@ -288,6 +317,7 @@ func (s *telnetSession) respondToEnablePrompt(raw string) string {
 	if !passwordPrompt.MatchString(raw) {
 		return raw
 	}
+	s.debugf(">>> [enable password]\n")
 	if _, err := io.WriteString(s.conn, s.enable+"\r\n"); err != nil {
 		return raw
 	}
