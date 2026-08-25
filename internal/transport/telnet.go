@@ -65,8 +65,6 @@ func (*Telnet) Dial(ctx context.Context, t Target) (Session, error) {
 	return s, nil
 }
 
-
-
 // login handles the telnet-level authentication: it waits for the device to
 // request a username, sends it, waits for the password prompt, sends the
 // password, then drains until the CLI prompt appears (indicating a successful
@@ -145,9 +143,9 @@ func (s *telnetSession) login(username, password string) error {
 					}
 				}
 				idle.Reset(loginIdle)
-			} else if loginStage >= 1 && promptRe.MatchString(tail(buf.Bytes(), 200)) {
+			} else if loginStage >= 1 && endsWithPrompt(buf.Bytes()) {
 				return nil
-			} else if loginStage == 0 && promptRe.MatchString(tail(buf.Bytes(), 200)) {
+			} else if loginStage == 0 && endsWithPrompt(buf.Bytes()) {
 				// Device didn't require a username (no login / aaa new-model off);
 				// just jump straight to the prompt.
 				return nil
@@ -164,7 +162,7 @@ func (s *telnetSession) login(username, password string) error {
 			if loginStage == 0 {
 				// Didn't see a username prompt; if we have output that looks like a
 				// prompt, treat login as complete (no-auth device).
-				if promptRe.MatchString(tail(buf.Bytes(), 200)) {
+				if endsWithPrompt(buf.Bytes()) {
 					return nil
 				}
 				// Keep waiting — some devices have a slow banner.
@@ -214,14 +212,14 @@ func (s *telnetSession) reader() {
 	}
 }
 
-// drain reads output until the device prompt reappears at the tail of the
-// buffer, the stream goes idle for s.idle without a prompt, or maxWait
+// drain reads output until the device prompt reappears as the last line of
+// the buffer, the stream goes idle for s.idle without a prompt, or maxWait
 // elapses — identical strategy to the SSH transport (ssh.go). Returns the
-// captured output and a boolean indicating whether the drain ended "incomplete"
-// — either the hard timeout (maxWait) fired, or the idle timer expired before
-// a prompt was seen (command did not complete, e.g. a large config with
-// >s.idle pauses between bursts).
-func (s *telnetSession) drain(maxWait time.Duration) (string, bool) {
+// captured output, whether the drain ended "incomplete" (command did not
+// finish), and the reason ("timeout": hard timeout fired; "closed": the
+// connection ended mid-command — reported loudly instead of silently saving
+// a truncated config).
+func (s *telnetSession) drain(maxWait time.Duration) (string, bool, string) {
 	var buf bytes.Buffer
 	hasData := false
 	idle := time.NewTimer(s.idle)
@@ -232,7 +230,7 @@ func (s *telnetSession) drain(maxWait time.Duration) (string, bool) {
 		select {
 		case chunk, ok := <-s.out:
 			if !ok {
-				return buf.String(), false
+				return buf.String(), true, drainClosed
 			}
 			hasData = true
 			buf.Write(chunk)
@@ -243,29 +241,29 @@ func (s *telnetSession) drain(maxWait time.Duration) (string, bool) {
 				}
 			}
 			idle.Reset(s.idle)
-			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+			if morePromptRe.MatchString(lastLine(buf.Bytes())) {
 				s.debugf(">>> [space]\n")
 				_, _ = io.WriteString(s.conn, " ")
 			}
-			if promptRe.MatchString(tail(buf.Bytes(), 200)) {
-				return buf.String(), false
+			if endsWithPrompt(buf.Bytes()) {
+				return buf.String(), false, ""
 			}
 		case <-idle.C:
-			if passwordPrompt.MatchString(buf.String()) {
-				return buf.String(), false
+			if endsWithPasswordPrompt(buf.Bytes()) {
+				return buf.String(), false, ""
 			}
-			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+			if morePromptRe.MatchString(lastLine(buf.Bytes())) {
 				s.debugf(">>> [space]\n")
 				_, _ = io.WriteString(s.conn, " ")
 				idle.Reset(s.idle)
 				continue
 			}
 			if !hasData {
-				return buf.String(), true
+				return buf.String(), true, drainTimeout
 			}
 			idle.Reset(s.idle)
 		case <-hard.C:
-			return buf.String(), true
+			return buf.String(), true, drainTimeout
 		}
 	}
 }
@@ -285,21 +283,24 @@ func (s *telnetSession) SendCommand(cmd string) (string, error) {
 	if _, err := io.WriteString(s.conn, cmd+"\r\n"); err != nil {
 		return "", err
 	}
-	raw, timedOut := s.drain(s.readTimeout)
+	raw, timedOut, reason := s.drain(s.readTimeout)
 	// Even on timeout, check whether the device is waiting for an enable
 	// password (Cisco IOS prompts for one after "enable"). The idle timer
 	// fires while the device waits for input, so we must respond to the
 	// password prompt BEFORE reporting a timeout.
-	if s.enable != "" && passwordPrompt.MatchString(raw) {
+	if s.enable != "" && endsWithPasswordPrompt([]byte(raw)) {
 		raw = s.respondToEnablePrompt(raw)
 		// Re-check: if drain returned incomplete for the enable-response
 		// drain too, report a timeout. Otherwise return cleaned output.
-		if !promptRe.MatchString(tail([]byte(raw), 200)) {
-			return "", fmt.Errorf("command %q timed out after %s", cmd, s.readTimeout)
+		if !endsWithPrompt([]byte(raw)) {
+			return "", fmt.Errorf("command %q did not complete (%s)", cmd, reason)
 		}
 		return cleanOutput(cmd, raw), nil
 	}
 	if timedOut {
+		if reason == drainClosed {
+			return "", fmt.Errorf("command %q did not complete: device closed the session mid-output (captured %d bytes)", cmd, len(raw))
+		}
 		return "", fmt.Errorf("command %q timed out after %s", cmd, s.readTimeout)
 	}
 	raw = s.respondToEnablePrompt(raw)
@@ -314,7 +315,7 @@ func (s *telnetSession) respondToEnablePrompt(raw string) string {
 	if s.enable == "" {
 		return raw
 	}
-	if !passwordPrompt.MatchString(raw) {
+	if !endsWithPasswordPrompt([]byte(raw)) {
 		return raw
 	}
 	s.debugf(">>> [enable password]\n")
@@ -322,7 +323,7 @@ func (s *telnetSession) respondToEnablePrompt(raw string) string {
 		return raw
 	}
 	raw += func() string {
-		s2, _ := s.drain(s.readTimeout)
+		s2, _, _ := s.drain(s.readTimeout)
 		return s2
 	}()
 	return raw

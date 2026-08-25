@@ -155,16 +155,16 @@ func listTransports(w http.ResponseWriter, r *http.Request) {
 }
 
 type deviceDTO struct {
-	Name           string     `json:"name"`
-	Host           string     `json:"host"`
-	Port           int        `json:"port"`
-	Driver         string     `json:"driver"`
-	Transport      string     `json:"transport"`
-	Credential     string     `json:"credential"`
-	Group          string     `json:"group"`
-	Enabled        bool       `json:"enabled"`
-	LastBackup     *time.Time `json:"last_backup"`  // null if no backup run exists
-	LastStatus     string     `json:"last_status"`  // "success"/"unchanged"/"failed"/""
+	Name       string     `json:"name"`
+	Host       string     `json:"host"`
+	Port       int        `json:"port"`
+	Driver     string     `json:"driver"`
+	Transport  string     `json:"transport"`
+	Credential string     `json:"credential"`
+	Group      string     `json:"group"`
+	Enabled    bool       `json:"enabled"`
+	LastBackup *time.Time `json:"last_backup"` // null if no backup run exists
+	LastStatus string     `json:"last_status"` // "success"/"unchanged"/"failed"/""
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {

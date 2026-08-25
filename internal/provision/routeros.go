@@ -24,10 +24,10 @@ import (
 
 // MikrotikResult is what a successful bootstrap hands back to the caller.
 type MikrotikResult struct {
-	User         string `json:"user"`          // the RouterOS user the key was installed for
-	PrivateKey   string `json:"private_key"`   // OpenSSH PEM - store this, it authenticates SSH
-	SSHPort      int    `json:"ssh_port"`      // the device's SSH service port
-	SSHEnabled   bool   `json:"ssh_enabled"`   // true once we're done (we enable it if it was off)
+	User         string `json:"user"`           // the RouterOS user the key was installed for
+	PrivateKey   string `json:"private_key"`    // OpenSSH PEM - store this, it authenticates SSH
+	SSHPort      int    `json:"ssh_port"`       // the device's SSH service port
+	SSHEnabled   bool   `json:"ssh_enabled"`    // true once we're done (we enable it if it was off)
 	SSHEnabledBy bool   `json:"ssh_enabled_by"` // true if WE enabled it (it had been disabled)
 }
 

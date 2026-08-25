@@ -164,7 +164,9 @@ func TestTelnetIdleTimeoutConfigurable(t *testing.T) {
 func TestTelnetCmdTimeoutConfigurable(t *testing.T) {
 	// Verify that a custom CmdTimeout is used (not the default 60s).
 	// We test by sending a command to a device that never responds with a
-	// prompt, and checking that it times out at the custom duration.
+	// prompt — and keeps the connection open (a device closing it must look
+	// like an error, not a completed command) — and checking that the command
+	// times out at the custom duration.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -180,7 +182,9 @@ func TestTelnetCmdTimeoutConfigurable(t *testing.T) {
 		_, _ = conn.Write([]byte("Router# "))
 		buf := make([]byte, 256)
 		conn.Read(buf) // consume "show running-config"
-		// Never send a prompt — forces timeout.
+		// Never send a prompt; hold the connection open well past the 2s
+		// command timeout so the hard timeout fires first.
+		time.Sleep(4 * time.Second)
 	}()
 
 	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
@@ -203,11 +207,131 @@ func TestTelnetCmdTimeoutConfigurable(t *testing.T) {
 
 	start := time.Now()
 	_, err = sess.SendCommand("show running-config")
+	if err == nil {
+		t.Fatal("expected a timeout error from SendCommand")
+	}
 	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected ~2s timeout, got %v", elapsed)
+	}
+}
+
+// A device (or network) dropping the session mid-dump must surface as an
+// error, never as a "successful" capture — silently saving truncated configs
+// is exactly how partial FortiGate backups used to be committed.
+func TestTelnetClosedMidCommandFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		conn, _ := ln.Accept()
+		if conn == nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte("Router# "))
+		buf := make([]byte, 256)
+		conn.Read(buf) // enable
+		_, _ = conn.Write([]byte("Router# "))
+		conn.Read(buf) // terminal length 0
+		_, _ = conn.Write([]byte("Router# "))
+		conn.Read(buf) // show running-config
+		_, _ = conn.Write([]byte("hostname fgt\r\nconfig system global\r\n"))
+		// Device dies mid-dump.
+	}()
+
+	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	tr, _ := Get("telnet")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	sess, err := tr.Dial(ctx, Target{
+		Host:        host,
+		Port:        port,
+		Timeout:     5 * time.Second,
+		CmdTimeout:  10 * time.Second,
+		IdleTimeout: 500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer sess.Close()
+
+	_, _ = sess.SendCommand("enable")
+	_, _ = sess.SendCommand("terminal length 0")
+	_, err = sess.SendCommand("show running-config")
+	if err == nil {
+		t.Fatal("expected an error when the session closes mid-command")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("expected a session-closed error, got: %v", err)
+	}
+}
+
+// Prompt-looking lines inside the dumped content (login banners, FortiGate
+// replacement-message HTML, ...) must not complete the command early — only a
+// genuine trailing prompt may.
+func TestTelnetPromptLikeContentDoesNotComplete(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		conn, _ := ln.Accept()
+		if conn == nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte("Router# "))
+		buf := make([]byte, 256)
+		conn.Read(buf) // enable
+		_, _ = conn.Write([]byte("Router# "))
+		conn.Read(buf) // terminal length 0
+		_, _ = conn.Write([]byte("Router# "))
+		conn.Read(buf) // show running-config
+		_, _ = conn.Write([]byte("set buffer \"<html>\"\r\n"))
+		_, _ = conn.Write([]byte("this whole line looks like a prompt#\r\n")) // matches promptRe mid-content
+		time.Sleep(700 * time.Millisecond)
+		_, _ = conn.Write([]byte("more output after the lookalike\r\n"))
+		time.Sleep(700 * time.Millisecond)
+		_, _ = conn.Write([]byte("final line\r\nRouter# "))
+	}()
+
+	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	tr, _ := Get("telnet")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	sess, err := tr.Dial(ctx, Target{
+		Host:        host,
+		Port:        port,
+		Timeout:     5 * time.Second,
+		CmdTimeout:  10 * time.Second,
+		IdleTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer sess.Close()
+
+	_, _ = sess.SendCommand("enable")
+	_, _ = sess.SendCommand("terminal length 0")
+	out, err := sess.SendCommand("show running-config")
 	if err != nil {
 		t.Fatalf("SendCommand: %v", err)
 	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("expected ~2s timeout, got %v", elapsed)
+	for _, want := range []string{"lookalike", "more output after", "final line"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output ended prematurely, missing %q:\n%s", want, out)
+		}
 	}
 }

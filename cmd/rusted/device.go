@@ -39,7 +39,7 @@ func deviceAddCmd() *cobra.Command {
 				return fmt.Errorf("credential %q: %w", cred, err)
 			}
 			d := &store.Device{
-				Name:         args[0], Host: host, Port: port, Driver: driver,
+				Name: args[0], Host: host, Port: port, Driver: driver,
 				Transport:    transport,
 				CmdTimeout:   cmdTimeout,
 				IdleTimeout:  idleTimeout,

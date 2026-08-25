@@ -137,6 +137,7 @@ git -C "$(rusted config show | awk '/backups:/{print $2}')" log --oneline
 | `rusted device add/list/remove/update/enable/disable` | Manage device inventory |
 | `rusted driver list` | List platform drivers |
 | `rusted backup run [NAME] [--all]` | Run backups |
+| `rusted backup run NAME --raw` | Run a backup saving the config verbatim (volatile fields included) |
 | `rusted backup run -v` | Run backups with verbose stderr progress |
 | `rusted backup history NAME` | Show a device's backup history |
 | `rusted serve` | Run the HTTP API for LibreNMS |
@@ -200,6 +201,25 @@ content actually changed** — so timestamps, uptimes, and "last changed" banner
 never create noise in your git history. A run is recorded as `success`
 (committed), `unchanged` (no diff), or `failed`.
 
+Some platforms also rewrite parts of the configuration on every save even when
+nothing really changed. Drivers declare those fields, and they are **ignored by
+default**: the `fortinet` driver, for example, drops FortiOS's rotating
+`#conf_file_ver=` header and re-encrypted secrets such as `set password ENC …`
+(each save produces fresh ciphertext that cannot be decrypted back, so keeping
+it would only create spurious commits). Encrypted PEM blocks are skipped too —
+FortiGate re-encrypts stored private keys with a fresh salt/IV on every save,
+so `set private-key "-----BEGIN ENCRYPTED PRIVATE KEY-----…` changes wholesale
+between identical dumps. Plain certificates and public keys are deterministic,
+so they stay in the backup.
+
+To capture a configuration **verbatim**, ignored fields included, pass `--raw`.
+It skips both the per-driver ignore rules and inline timestamp masking, storing
+exactly what the device emitted:
+
+```sh
+rusted backup run fgt-cluster --raw   # complete capture, volatile fields included
+```
+
 ### Backup error reporting
 
 When a backup fails, rusted prints the failure reason to **stderr** (even without
@@ -230,6 +250,18 @@ rusted device update slow-sw --cmd-timeout 180 --idle-timeout 10000
 **Pagination** (`--More--`) is handled automatically: when a device emits a
 pager prompt, the transport sends a space to advance past it without treating
 it as a timeout. This works for both SSH and telnet.
+
+**Truncated dumps fail loudly.** If the device (or the network) drops the
+session mid-dump — FortiGate HA clusters do this occasionally under load — the
+run is recorded as `failed` and **nothing is committed**, instead of silently
+saving a partial capture as a valid backup:
+
+```
+FAIL fgt-cluster: config command "show full-configuration": command "show full-configuration" did not complete: device closed the session mid-output (captured 262144 bytes)
+```
+
+Large configurations can also exceed the 60 s hard timeout before finishing;
+raise the per-device `--cmd-timeout` for them (see above).
 
 For real-time progress on a long run, use `--verbose` (`-v`):
 

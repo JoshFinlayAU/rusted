@@ -24,6 +24,9 @@ type Engine struct {
 	Timeout   time.Duration // per-device connect timeout
 	Log       io.Writer     // verbose progress output (nil = silent)
 	Debug     io.Writer     // raw I/O debug output (nil = silent; set by --debug/-vv)
+	// Raw saves the captured configuration verbatim: the driver's Strip rules
+	// are skipped and dynamic strings are not masked (--raw).
+	Raw bool
 }
 
 // New builds an Engine with sensible defaults.
@@ -124,15 +127,15 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 	e.logf("using transport %q, driver %q\n", transportName, drv.Name)
 
 	tgt := transport.Target{
-		Name:        dev.Name,
-		Host:        dev.Host,
-		Port:        dev.Port,
-		Username:    dev.Credential.Username,
-		Password:    dev.Credential.Password,
-		PrivateKey:  []byte(dev.Credential.PrivateKey),
-		Enable:      dev.Credential.Enable,
-		Timeout:     e.Timeout,
-		Debug:       e.Debug,
+		Name:       dev.Name,
+		Host:       dev.Host,
+		Port:       dev.Port,
+		Username:   dev.Credential.Username,
+		Password:   dev.Credential.Password,
+		PrivateKey: []byte(dev.Credential.PrivateKey),
+		Enable:     dev.Credential.Enable,
+		Timeout:    e.Timeout,
+		Debug:      e.Debug,
 	}
 	if dev.CmdTimeout > 0 {
 		tgt.CmdTimeout = time.Duration(dev.CmdTimeout) * time.Second
@@ -172,7 +175,13 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 		}
 	}
 
-	clean := drv.Clean(buf.String())
+	var clean string
+	if e.Raw {
+		e.logf("  raw mode: skipping volatile-line stripping and masking\n")
+		clean = drv.CleanRaw(buf.String())
+	} else {
+		clean = drv.Clean(buf.String())
+	}
 	if strings.TrimSpace(clean) == "" {
 		e.logf("  captured empty configuration\n")
 		return finish("failed", "captured empty configuration", "", 0)

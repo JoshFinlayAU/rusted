@@ -171,8 +171,9 @@ func (*SSH) Dial(ctx context.Context, t Target) (Session, error) {
 var usernamePrompt = regexp.MustCompile(`(?i)(u?ser ?name|log ?in)[:\s]*$`)
 
 // passwordPrompt matches "Password:" / "Passphrase:" — used both for the initial
-// telnet login and for the Cisco "enable" privilege escalation.
-var passwordPrompt = regexp.MustCompile(`(?i)pass(word|phrase)[:\s]*$`)
+// telnet login and for the Cisco "enable" privilege escalation. The colon is
+// required so config text merely containing the word "password" cannot match.
+var passwordPrompt = regexp.MustCompile(`(?i)pass(word|phrase):\s*$`)
 
 // privilegedPromptRe matches a prompt ending in "#" (Cisco IOS/NX-OS/ASA
 // enable mode), as opposed to ">" (user exec) or "$" (shells).
@@ -185,11 +186,11 @@ var privilegedPromptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+#\s*$`)
 func (s *sshSession) elevate(enablePassword string) error {
 	s.debugf(">>> enable\n")
 	_, _ = io.WriteString(s.stdin, "enable\n")
-	out, _ := s.drain(s.readTimeout)
+	out, _, _ := s.drain(s.readTimeout)
 
-	if !passwordPrompt.MatchString(out) {
+	if !endsWithPasswordPrompt([]byte(out)) {
 		// No password prompt — either already privileged or enable isn't needed.
-		if privilegedPromptRe.MatchString(tail([]byte(out), 200)) {
+		if endsWithPrivilegedPrompt([]byte(out)) {
 			return nil
 		}
 		return nil
@@ -197,8 +198,8 @@ func (s *sshSession) elevate(enablePassword string) error {
 
 	s.debugf(">>> [enable password]\n")
 	_, _ = io.WriteString(s.stdin, enablePassword+"\n")
-	out, _ = s.drain(s.readTimeout)
-	if !privilegedPromptRe.MatchString(tail([]byte(out), 200)) {
+	out, _, _ = s.drain(s.readTimeout)
+	if !endsWithPrivilegedPrompt([]byte(out)) {
 		return fmt.Errorf("did not reach privileged mode after enable")
 	}
 	return nil
@@ -240,18 +241,30 @@ func (s *sshSession) reader(r io.Reader) {
 	}
 }
 
-// drain reads output until the device prompt reappears at the tail of the
-// buffer, the stream goes idle for s.idle, or maxWait elapses.
+// Drain outcomes for everything that is not a clean prompt return.
+const (
+	drainTimeout = "timeout" // hard per-command timeout fired
+	drainClosed  = "closed"  // device/network closed the session mid-command
+)
+
+// drain reads output until a bare device prompt (no trailing newline —
+// see trailingMatches) appears at the end of the buffer, the stream goes
+// idle for s.idle, or maxWait elapses.
 //
-// Returns (output, true) "incomplete" only when the hard timeout fired.
-// When the idle timer fires:
-//   - If a Password: prompt was seen, return "complete" (false) so the
-//     caller can respond to it.
-//   - If no data was ever received, return "incomplete" (true) — truly hung.
-//   - If data WAS received (device pausing between bursts on a large dump),
-//     reset the idle timer and keep draining — only the hard timeout can
-//     terminate this state.
-func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
+// Returns (output, incomplete, reason). incomplete=false always means the
+// device prompt was seen (or a Password: prompt is pending). When
+// incomplete=true, reason explains why:
+//   - drainTimeout: the hard timeout fired — the command did not finish.
+//   - drainClosed: the session ended mid-command. This used to be treated as
+//     success, silently saving truncated configs (e.g. a FortiGate dropping
+//     the SSH session partway through show full-configuration); it now fails
+//     loudly instead.
+//
+// On the idle timer: a Password: prompt at the tail completes (caller
+// responds); a pager prompt gets a space; with data already received the idle
+// timer resets and draining continues (devices pause between bursts on large
+// dumps) — only the hard timeout can then end the command.
+func (s *sshSession) drain(maxWait time.Duration) (string, bool, string) {
 	var buf bytes.Buffer
 	hasData := false
 	idle := time.NewTimer(s.idle)
@@ -262,7 +275,7 @@ func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
 		select {
 		case chunk, ok := <-s.out:
 			if !ok {
-				return buf.String(), false
+				return buf.String(), true, drainClosed
 			}
 			hasData = true
 			buf.Write(chunk)
@@ -275,32 +288,32 @@ func (s *sshSession) drain(maxWait time.Duration) (string, bool) {
 			idle.Reset(s.idle)
 			// Detect a pager prompt like "--More--" and send space to
 			// advance past it.
-			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+			if morePromptRe.MatchString(lastLine(buf.Bytes())) {
 				s.debugf(">>> [space]\n")
 				_, _ = io.WriteString(s.stdin, " ")
 				// Keep the current idle but note we responded.
 			}
-			if promptRe.MatchString(tail(buf.Bytes(), 200)) {
-				return buf.String(), false
+			if endsWithPrompt(buf.Bytes()) {
+				return buf.String(), false, ""
 			}
 		case <-idle.C:
 			// Device may be waiting for a password (e.g. after "enable").
-			if passwordPrompt.MatchString(buf.String()) {
-				return buf.String(), false
+			if endsWithPasswordPrompt(buf.Bytes()) {
+				return buf.String(), false, ""
 			}
 			// Device may be waiting at a pager prompt.
-			if morePromptRe.MatchString(tail(buf.Bytes(), 100)) {
+			if morePromptRe.MatchString(lastLine(buf.Bytes())) {
 				s.debugf(">>> [space]\n")
 				_, _ = io.WriteString(s.stdin, " ")
 				idle.Reset(s.idle)
 				continue
 			}
 			if !hasData {
-				return buf.String(), true
+				return buf.String(), true, drainTimeout
 			}
 			idle.Reset(s.idle)
 		case <-hard.C:
-			return buf.String(), true
+			return buf.String(), true, drainTimeout
 		}
 	}
 }
@@ -316,19 +329,22 @@ func (s *sshSession) SendCommand(cmd string) (string, error) {
 	if _, err := io.WriteString(s.stdin, cmd+"\n"); err != nil {
 		return "", err
 	}
-	raw, timedOut := s.drain(s.readTimeout)
+	raw, timedOut, reason := s.drain(s.readTimeout)
 	// Even on timeout, check whether the device is waiting for an enable
 	// password (Cisco IOS prompts for one after "enable"). The idle timer
 	// fires while the device waits for input, so we must respond to the
 	// password prompt BEFORE reporting a timeout.
-	if s.enable != "" && passwordPrompt.MatchString(raw) {
+	if s.enable != "" && endsWithPasswordPrompt([]byte(raw)) {
 		raw = s.respondToEnablePrompt(raw)
-		if !promptRe.MatchString(tail([]byte(raw), 200)) {
-			return "", fmt.Errorf("command %q timed out after %s", cmd, s.readTimeout)
+		if !endsWithPrompt([]byte(raw)) {
+			return "", fmt.Errorf("command %q did not complete (%s)", cmd, reason)
 		}
 		return cleanOutput(cmd, raw), nil
 	}
 	if timedOut {
+		if reason == drainClosed {
+			return "", fmt.Errorf("command %q did not complete: device closed the session mid-output (captured %d bytes)", cmd, len(raw))
+		}
 		return "", fmt.Errorf("command %q timed out after %s", cmd, s.readTimeout)
 	}
 	raw = s.respondToEnablePrompt(raw)
@@ -342,7 +358,7 @@ func (s *sshSession) respondToEnablePrompt(raw string) string {
 	if s.enable == "" {
 		return raw
 	}
-	if !passwordPrompt.MatchString(raw) {
+	if !endsWithPasswordPrompt([]byte(raw)) {
 		return raw
 	}
 	s.debugf(">>> [enable password]\n")
@@ -350,7 +366,7 @@ func (s *sshSession) respondToEnablePrompt(raw string) string {
 		return raw
 	}
 	raw += func() string {
-		s2, _ := s.drain(s.readTimeout)
+		s2, _, _ := s.drain(s.readTimeout)
 		return s2
 	}()
 	return raw

@@ -15,7 +15,8 @@ type Driver struct {
     Description  string
     Init         []string          // run once after login (disable paging, enter enable, ...)
     Config       []string          // output of these = the saved configuration
-    Strip        []*regexp.Regexp  // whole lines to drop (volatile headers, etc.)
+    Strip        []*regexp.Regexp  // whole lines to drop (volatile headers, rotating secrets, ...; skipped by --raw)
+    StripBlocks  []*BlockStrip     // multi-line regions to drop (volatile PEM blocks; Start..End inclusive, skipped by --raw)
     RawNormalize bool              // true disables generic timestamp/date masking
 }
 ```
@@ -33,12 +34,26 @@ The single most important property of a driver is that **two backups of an
 unchanged device produce identical bytes**. Two layers cooperate:
 
 - **`Strip`** removes whole volatile lines, e.g. NX-OS `!Time: ...`, IOS
-  `Building configuration...`, or the RouterOS `# <date> by RouterOS` header.
+  `Building configuration...`, the RouterOS `# <date> by RouterOS` header, or
+  FortiOS's rotating `#conf_file_ver=` header and re-encrypted secrets
+  (`set password ENC …`, fresh ciphertext on every save).
+- **`StripBlocks`** removes multi-line regions — from a line matching `Start`
+  through the first following line matching `End`, both inclusive. Use for
+  volatile PEM blocks: FortiGate re-encrypts stored private keys with a new
+  salt/IV on every save, so the whole `set private-key "-----BEGIN ENCRYPTED
+  PRIVATE KEY-----…` block changes between identical dumps. Only *encrypted*
+  blocks are volatile — plain certificates and public keys are deterministic
+  and must be kept.
 - **Generic normalisation** (`internal/normalize`) masks dynamic *substrings*
   embedded in lines you otherwise want to keep — `! Last configuration change at
   10:02:11 UTC Tue Jun 16 2026` becomes `! Last configuration change at
   <TIMESTAMP>`. This is global, so a new platform benefits automatically; only
   add `Strip` rules for volatile content the normaliser does not recognise.
+
+All `Strip` rules are applied by default on every backup. `rusted backup run
+--raw` bypasses them entirely (and skips normalisation too), storing the
+verbatim capture — useful when you need to audit exactly what the device
+emitted, at the cost of a commit per run.
 
 Set `RawNormalize: true` only if masking would corrupt a platform's config.
 

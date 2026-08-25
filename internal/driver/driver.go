@@ -30,24 +30,53 @@ type Driver struct {
 	// Config commands whose combined output forms the saved configuration.
 	Config []string
 	// Strip drops whole matching lines from the captured config. Use for
-	// volatile lines such as "Building configuration..." or "!Time: ...".
+	// volatile lines such as "Building configuration...", "!Time: ..." or
+	// FortiOS's rotating "set password ENC ..." secrets. These rules define
+	// what is ignored by default; --raw skips them entirely.
 	Strip []*regexp.Regexp
+	// StripBlocks drops multi-line regions: from the first line matching
+	// Start through the first following line matching End (both inclusive).
+	// Use for volatile PEM blocks — FortiOS re-encrypts stored private keys
+	// with fresh salt/IV on every save, so "set private-key \"-----BEGIN
+	// ENCRYPTED PRIVATE KEY-----\" changes wholesale each dump. Skipped by
+	// --raw like Strip.
+	StripBlocks []*BlockStrip
 	// RawNormalize, when true, disables the generic dynamic-string normaliser
 	// (timestamp/date/uptime masking). Leave false unless a platform's config
 	// is corrupted by masking.
 	RawNormalize bool
 }
 
+// BlockStrip is one multi-line region to drop; see Driver.StripBlocks.
+type BlockStrip struct {
+	Start *regexp.Regexp
+	End   *regexp.Regexp
+}
+
 // Clean produces the canonical, change-stable form of a captured config:
 //  1. drop whole volatile lines matched by the driver's Strip rules;
-//  2. mask inline dynamic strings (timestamps, dates, uptimes) so they do not
+//  2. drop regions matched by the driver's StripBlocks rules;
+//  3. mask inline dynamic strings (timestamps, dates, uptimes) so they do not
 //     trigger spurious "changed" results — unless RawNormalize is set;
-//  3. trim trailing whitespace and ensure a single trailing newline.
+//  4. trim trailing whitespace and ensure a single trailing newline.
 func (d Driver) Clean(raw string) string {
 	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
 	out := make([]string, 0, len(lines))
+	skip := -1 // index into d.StripBlocks of the block being skipped, -1 = none
 nextLine:
 	for _, ln := range lines {
+		if skip >= 0 {
+			if d.StripBlocks[skip].End.MatchString(ln) {
+				skip = -1
+			}
+			continue
+		}
+		for i, b := range d.StripBlocks {
+			if b.Start.MatchString(ln) {
+				skip = i
+				continue nextLine
+			}
+		}
 		for _, re := range d.Strip {
 			if re.MatchString(ln) {
 				continue nextLine
@@ -60,6 +89,19 @@ nextLine:
 		joined = normalize.Apply(joined)
 	}
 	return joined + "\n"
+}
+
+// CleanRaw is Clean without the change-stability steps: no Strip rules are
+// applied and dynamic strings are not masked. Only line endings and trailing
+// whitespace are normalised so a verbatim capture stays diff-friendly. Used by
+// 'rusted backup run --raw' to store everything the device emitted.
+func (d Driver) CleanRaw(raw string) string {
+	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, strings.TrimRight(ln, " \t"))
+	}
+	return strings.Trim(strings.Join(out, "\n"), "\n") + "\n"
 }
 
 var (
@@ -220,6 +262,24 @@ func builtins() []Driver {
 			Description: "Fortinet FortiOS",
 			Init:        []string{"config system console", "set output standard", "end"},
 			Config:      []string{"show full-configuration"},
+			// FortiGate rewrites these on every save even when nothing changed:
+			// conf_file_ver is a save counter, and stored secrets are re-encrypted
+			// with fresh ciphertext each time ("password ENC <blob>"). The
+			// ciphertext is not reversible, so it is useless in a backup diff.
+			Strip: []*regexp.Regexp{
+				re(`^#conf_file_ver=`),
+				re(`^\s*set\s+\S+\s+ENC\s+\S+`),
+			},
+			// Only ENCRYPTED PEM blocks (PKCS#8 private keys) are skipped: they
+			// are re-encrypted with a fresh salt/IV on every save, so their
+			// base64 never matches between dumps. Plain certificates, CSRs and
+			// public keys are deterministic and stay in the backup.
+			StripBlocks: []*BlockStrip{
+				{
+					Start: re(`^\s*set\s+\S+\s+"-----BEGIN ENCRYPTED [A-Z ]+-----`),
+					End:   re(`-----END ENCRYPTED [A-Z ]+-----"?\.?\s*$`),
+				},
+			},
 		},
 	}
 }
