@@ -173,22 +173,29 @@ is therefore wiped every night: the package can no longer be resolved, and the
 next morning both the repository entry and the plugin are gone from `vendor/`.
 
 To make the installation persistent, register the path repository in Composer's
-**global** configuration instead — `<COMPOSER_HOME>/config.json`, typically
-`/opt/librenms/.composer/config.json` — which lives outside the LibreNMS git tree
-and survives every reset. Adjust the URL to the real path on your server (same
+**global** configuration (`<COMPOSER_HOME>/config.json`) — it lives outside the
+LibreNMS git tree and survives every reset. Run the command as the `librenms`
+user from the LibreNMS directory, so the entry lands in the same Composer home
+the nightly cron reads. Adjust the URL to the real path on your server (same
 rules as before: absolute, readable by `librenms`, ending at the folder that holds
 the plugin's own `composer.json`, not its parent):
 
 ```sh
+cd /opt/librenms
 sudo -u librenms php composer.phar config --global repositories.rusted \
   '{"type":"path","url":"/opt/rusted-plugin/librenms-module"}'
 ```
 
-Then (re)install the package once exactly as in steps 2–4 above. From then on the
-nightly flow resolves the package through the global repository and reinstalls
-the plugin automatically — nothing else needs redoing: the enabled state lives in
-the database and the connection settings (`RUSTED_API_URL` / `RUSTED_API_TOKEN`)
-live in `.env`; both survive updates untouched.
+Composer merges global repositories into every project, so once this entry is in
+place the hand-edit of `composer.json` described in step 1 is unnecessary:
+both the initial `plugin:add` and the nightly re-install resolve the package
+through the global repository. This setup has been verified in production
+against repeated `daily.sh` runs — the plugin survives untouched.
+
+Then install the package once exactly as in steps 2–4 above. From then on nothing
+else needs redoing: the enabled state lives in the database and the connection
+settings (`RUSTED_API_URL` / `RUSTED_API_TOKEN`) live in `.env`; both survive
+updates untouched.
 
 Verify that the repository was written where the nightly cron will read it:
 
