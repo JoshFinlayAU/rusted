@@ -86,9 +86,17 @@ class RustedController extends Controller
         return $this->proxy(fn () => RustedClient::client()->post('/api/devices', $data));
     }
 
-    public function apiRemoveDevice(string $name): JsonResponse
+    /**
+     * Delete a device from rusted. The optional ?purge=true flag MUST be
+     * relayed explicitly: the rusted API reads it from the query string of
+     * the proxied call, so dropping it here would silently downgrade an
+     * irreversible purge to a plain delete.
+     */
+    public function apiRemoveDevice(string $name, Request $request): JsonResponse
     {
-        return $this->proxy(fn () => RustedClient::client()->delete('/api/devices/'.rawurlencode($name)));
+        $suffix = $request->boolean('purge') ? '?purge=true' : '';
+
+        return $this->proxy(fn () => RustedClient::client()->delete('/api/devices/'.rawurlencode($name).$suffix));
     }
 
     /**
@@ -512,9 +520,71 @@ class RustedController extends Controller
     }
 
     /**
+     * Download EVERY device's full configuration history (every git revision +
+     * the latest config of each) as one zip — the "massive" export used to
+     * archive or migrate all configurations at once. Each device lands in its
+     * own folder with a MANIFEST.txt carrying the git metadata of every stored
+     * version; a top-level MANIFEST.txt indexes what is inside.
+     */
+    public function apiExportZip(): Response
+    {
+        try {
+            $resp = RustedClient::client()->get('/api/devices');
+        } catch (\Throwable $e) {
+            return response('Could not reach the rusted API: '.$e->getMessage(), 502)
+                ->header('Content-Type', 'text/plain; charset=utf-8');
+        }
+        if (! $resp->successful()) {
+            return response('Could not list devices: HTTP '.$resp->status(), 502)
+                ->header('Content-Type', 'text/plain; charset=utf-8');
+        }
+
+        $devices = is_array($resp->json()) ? $resp->json() : [];
+        $path = tempnam(sys_get_temp_dir(), 'rusted-export-');
+        $zip = new ZipArchive();
+        if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            @unlink($path);
+            return response('Could not create the export archive.', 500)
+                ->header('Content-Type', 'text/plain; charset=utf-8');
+        }
+
+        $index = [];   // name => ['revisions' => int, 'captured_at' => string]
+        foreach ($devices as $d) {
+            $name = $d['name'] ?? '';
+            if ($name === '') {
+                continue;
+            }
+            $got = $this->snapshotDevice($zip, $name);
+            if ($got > 0) {
+                $index[$name] = [
+                    'revisions'   => $got,
+                    'captured_at' => $this->lastCapturedAt($name),
+                ];
+            }
+        }
+        $zip->addFromString('MANIFEST.txt', $this->buildExportManifest($index));
+        $zip->close();
+
+        if (empty($index) || filesize($path) <= 0) {
+            @unlink($path);
+            return response('No configuration history found for any device.', 404)
+                ->header('Content-Type', 'text/plain; charset=utf-8');
+        }
+
+        $content = file_get_contents($path);
+        @unlink($path);
+
+        return response($content, 200, [
+            'Content-Type'        => 'application/zip',
+            'Content-Disposition' => 'attachment; filename="rusted-configs-'.date('Ymd-His').'.zip"',
+        ]);
+    }
+
+    /**
      * Download a device's full configuration history (every git revision +
      * the latest config) as a zip, so it can be archived before the device is
-     * ever removed from rusted.
+     * ever removed from rusted. A MANIFEST.txt inside states exactly when each
+     * version was captured (git commit date/time), by whom and why.
      */
     public function apiHistoryZip(string $name): Response
     {
@@ -546,10 +616,10 @@ class RustedController extends Controller
             return null;
         }
 
-        $had = $this->snapshotDevice($zip, $name);
+        $got = $this->snapshotDevice($zip, $name);
         $zip->close();
 
-        if (! $had || filesize($path) <= 0) {
+        if ($got <= 0 || filesize($path) <= 0) {
             @unlink($path);
             return null;
         }
@@ -558,12 +628,13 @@ class RustedController extends Controller
     }
 
     /**
-     * Write every git revision (and the latest config) of a device into $zip.
-     * Returns true if anything was captured.
+     * Write every git revision (and the latest config) of a device into $zip,
+     * plus a MANIFEST.txt describing each version with its git metadata.
+     * Returns the number of files captured (0 = nothing to export).
      */
-    private function snapshotDevice(ZipArchive $zip, string $name): bool
+    private function snapshotDevice(ZipArchive $zip, string $name): int
     {
-        $captured = false;
+        $got = 0;
         try {
             $v = RustedClient::client()->get('/api/devices/'.rawurlencode($name).'/versions');
             $versions = $v->successful() && is_array($v->json()) ? $v->json() : [];
@@ -572,32 +643,127 @@ class RustedController extends Controller
         }
 
         // Latest on disk.
+        $hasLatest = false;
         try {
             $latest = RustedClient::client()->get('/api/devices/'.rawurlencode($name).'/config');
             if ($latest->successful() && $latest->body() !== '') {
                 $zip->addFromString($name.'/latest.cfg', $latest->body());
-                $captured = true;
+                $hasLatest = true;
+                $got++;
             }
         } catch (\Throwable) {
             // device may have no backup yet
         }
 
+        $seen = [];
         foreach ($versions as $ver) {
             $commit = $ver['commit'] ?? '';
-            if ($commit === '') {
+            if ($commit === '' || isset($seen[$commit])) {
                 continue;
             }
             try {
                 $c = RustedClient::client()->get('/api/devices/'.rawurlencode($name).'/config?commit='.rawurlencode($commit));
                 if ($c->successful()) {
                     $zip->addFromString($name.'/'.$commit.'.cfg', $c->body());
-                    $captured = true;
+                    $seen[$commit] = true;
+                    $got++;
                 }
             } catch (\Throwable) {
                 continue;
             }
         }
 
-        return $captured;
+        if ($got > 0) {
+            $zip->addFromString($name.'/MANIFEST.txt', $this->buildManifest($name, $versions, $hasLatest));
+        }
+
+        return $got;
+    }
+
+    /**
+     * RFC3339 timestamp of the newest stored version of a device, or '-'.
+     * Used for the summary table of the bulk export.
+     */
+    private function lastCapturedAt(string $name): string
+    {
+        try {
+            $v = RustedClient::client()->get('/api/devices/'.rawurlencode($name).'/versions');
+            $versions = $v->successful() && is_array($v->json()) ? $v->json() : [];
+        } catch (\Throwable) {
+            return '-';
+        }
+
+        return $versions[0]['captured_at'] ?? '-';
+    }
+
+    /**
+     * Human-readable index of every version in a device folder: when each
+     * configuration was captured (git author date), by whom, and the commit
+     * subject — so <commit>.cfg files can be traced back to their moment.
+     *
+     * @param  array<int, array<string, mixed>>  $versions  rusted /versions entries
+     */
+    private function buildManifest(string $name, array $versions, bool $hasLatest): string
+    {
+        $out = "rusted configuration history\n"
+            ."============================\n"
+            .'device     : '.$name."\n"
+            .'generated  : '.date('c')."\n"
+            .'revisions  : '.count($versions)."\n"
+            ."source     : rusted backup repository (git)\n"
+            ."\n"
+            ."Files\n"
+            ."-----\n"
+            ."  <commit>.cfg  one stored revision of the device configuration\n";
+        if ($hasLatest) {
+            $out .= "  latest.cfg    the most recent on-disk copy at export time\n";
+        }
+        $out .= "\n"
+            ."Version index (newest first)\n"
+            ."----------------------------\n";
+
+        if (! $versions) {
+            $out .= "(no git revisions recorded)\n";
+
+            return $out;
+        }
+
+        // commit(8) captured_at(26) author(16) subject...
+        $out .= str_pad('commit', 8).' '.str_pad('captured_at', 26).' '
+            .str_pad('author', 16)."subject\n";
+        foreach ($versions as $ver) {
+            $out .= str_pad(substr((string) ($ver['commit'] ?? ''), 0, 7), 8).' '
+                .str_pad(substr((string) ($ver['captured_at'] ?? '-'), 0, 25), 26).' '
+                .str_pad(substr((string) ($ver['author'] ?? '-'), 0, 15), 16)
+                .((string) ($ver['subject'] ?? ''))."\n";
+        }
+
+        return $out;
+    }
+
+    /**
+     * Top-level MANIFEST.txt of the bulk export: which devices are included,
+     * how many versions each carries and when the newest one was captured.
+     *
+     * @param  array<string, array{revisions: int, captured_at: string}>  $index
+     */
+    private function buildExportManifest(array $index): string
+    {
+        $out = "rusted bulk configuration export\n"
+            ."================================\n"
+            .'generated : '.date('c')."\n"
+            .'devices   : '.count($index)."\n"
+            ."\n"
+            ."Each sub-folder holds one device's full history plus its own\n"
+            ."MANIFEST.txt listing the git metadata of every stored version.\n"
+            ."\n"
+            ."device                            revisions  last capture\n";
+        foreach ($index as $name => $info) {
+            $out .= str_pad(substr($name, 0, 31), 32).' '
+                .str_pad((string) $info['revisions'], 9).' '
+                .$info['captured_at']."\n";
+        }
+
+        return $out;
     }
 }

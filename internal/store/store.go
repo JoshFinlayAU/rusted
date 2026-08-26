@@ -495,6 +495,18 @@ func (s *Store) RecordRun(r *BackupRun) error {
 	return err
 }
 
+// RemapRunCommits rewrites recorded commit hashes after a history rewrite
+// (git filter-repo), so the runs of surviving devices still point at valid
+// commits. Best-effort by design: unknown/unchanged hashes are simply left.
+func (s *Store) RemapRunCommits(mapping map[string]string) error {
+	for oldHash, newHash := range mapping {
+		if _, err := s.db.Exec(`UPDATE backup_runs SET commit_hash = ? WHERE commit_hash = ?`, newHash, oldHash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // History returns backup runs for a device (most recent first), limited to
 // limit rows (0 = no limit).
 func (s *Store) History(deviceName string, limit int) ([]*BackupRun, error) {

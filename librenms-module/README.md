@@ -36,7 +36,8 @@ the `rusted serve` HTTP API.
   **Enabled toggle** (enable/disable — soft, history preserved), **Back up now**
   (runs a backup, surfaces any error), **Show history** (opens the configuration
   viewer — revisions + diff), and **Remove** (downloads every configuration
-  revision as a zip, *then* deletes the device). It also offers a one-click
+  revision as a zip, *then* deletes the device and purges its files from the
+  backup repository). It also offers a one-click
   "Add to rusted" when the device isn't managed yet.
 - A **settings page** showing API connectivity status.
 
@@ -292,10 +293,10 @@ Every row ends in the **four icon buttons**:
 | Enabled toggle (🔌) | enable ↔ disable (soft — never deletes; keeps history) |
 | Back up now (🔽) | triggers an immediate backup; surfaces any error |
 | Show history (📜) | opens that device's configuration viewer (revisions + config + diff) |
-| Delete (🗑) | **downloads the device's full configuration history as a zip first**, then deletes the device from rusted; if the download fails, the device is **not** deleted |
+| Delete (🗑) | opens a dialog: the **full configuration history is downloaded as a zip first**, then the device is deleted from rusted and its config file removed from the backup repository; an optional **"Irreversible purge"** checkbox also erases every stored version from the git history (needs `git-filter-repo` on the rusted host). If the download fails, nothing is deleted |
 
 Use the **Device sync** button (top right) to bulk-add or bulk-disable LibreNMS
-devices.
+devices, and **Export all** to download every device's full history in one zip.
 
 ### Verifying the install
 
@@ -374,10 +375,11 @@ receiver (all `web`+`auth`+CSRF protected):
 | `GET plugin/rusted/api/devices/{name}` | `GET /api/devices/{name}` |
 | `POST plugin/rusted/api/devices` | `POST /api/devices` (create) |
 | `PUT plugin/rusted/api/devices/{name}` | partial update (GET current, merge, POST upsert) — used for inline Driver/Transport/Port edits |
-| `DELETE plugin/rusted/api/devices/{name}` | `DELETE /api/devices/{name}` |
+| `DELETE plugin/rusted/api/devices/{name}` | `DELETE /api/devices/{name}` — add `?purge=true` to irreversibly erase the device's configs from the backup repository history too (needs `git-filter-repo`; 501 if unavailable) |
 | `POST plugin/rusted/api/devices/{name}/backup` | `POST /api/devices/{name}/backup` |
 | `GET plugin/rusted/api/devices/{name}/history` | `GET /api/devices/{name}/history` |
-| `GET plugin/rusted/api/devices/{name}/history/zip` | `GET` device's version history built into a zip (every revision + latest) |
+| `GET plugin/rusted/api/devices/{name}/history/zip` | `GET` device's version history built into a zip (every revision + latest, plus a `MANIFEST.txt` with the git metadata — commit, capture timestamp, author, subject — of each version) |
+| `GET plugin/rusted/api/export/zip` | bulk export: **every** device's full history in a single zip (`rusted-configs-<timestamp>.zip`), one folder per device with its own `MANIFEST.txt`, plus a top-level index |
 | `POST plugin/rusted/api/devices/{name}/enabled` | flips the device's `enabled` flag via upsert (preserves name/driver/transport/credential/group; history kept) |
 | `GET plugin/rusted/api/devices/{name}/versions` | `GET /api/devices/{name}/versions` (revision list) |
 | `GET plugin/rusted/api/devices/{name}/config?commit=<hash>` | `GET /api/devices/{name}/config` — latest, or `?commit=` for a revision (**text/plain**) |
@@ -455,7 +457,7 @@ read the label), plus an enable/disable toggle and a delete:
 | Enabled toggle (🔌) | enable ↔ disable (soft) | **yes** — just stops/resumes backups |
 | Back up now (🔽) | triggers a backup immediately; shows an error if it fails | — |
 | Show history (📜) | opens the viewer with revisions + config/diff | — |
-| Remove (🗑) | **downloads a zip of every revision first**, then deletes the device from rusted | archive saved first; device then gone |
+| Remove (🗑) | opens a dialog with an optional **Irreversible purge** checkbox; downloads a zip of every revision first, then deletes the device from rusted and removes its config file from the backup repository (purge also erases the git history) | archive saved first; device then gone (also from `./backups`, or entirely with purge) |
 
 The **Remove** button is the only destructive action here, and it only proceeds
 once the configuration archive has been handed to the browser as a download. If

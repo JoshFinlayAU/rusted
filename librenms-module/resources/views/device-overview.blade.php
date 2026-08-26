@@ -10,6 +10,40 @@
     </div>
 </div>
 
+<div id="rusted-del-backdrop" style="display:none;position:fixed;top:0;right:0;bottom:0;left:0;background:#000;z-index:1040;opacity:.5"></div>
+<div id="rusted-del-modal" style="display:none;position:fixed;top:0;right:0;bottom:0;left:0;z-index:1050;overflow:auto">
+    <div class="modal-dialog" role="document" style="margin-top:10%">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" id="rusted-del-close">&times;</button>
+                <h4 class="modal-title">Delete <span id="rusted-del-name"></span></h4>
+            </div>
+            <div class="modal-body">
+                <p>The device's <strong>full configuration history is downloaded first</strong> as a zip;
+                    the delete proceeds only if that download succeeds.</p>
+                <div class="checkbox" style="margin-top:12px">
+                    <label>
+                        <input type="checkbox" id="rusted-del-purge">
+                        <strong>Irreversible purge:</strong> also erase every stored version of this device
+                        from the backup repository's git history
+                    </label>
+                </div>
+                <p class="text-danger" id="rusted-del-purge-warn" style="display:none">
+                    Requires <code>git-filter-repo</code> on the rusted host. The repository history is
+                    rewritten: even old revisions become unrecoverable and all commit hashes change
+                    (recorded backup references are remapped automatically).
+                </p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" id="rusted-del-cancel">Cancel</button>
+                <button type="button" class="btn btn-danger" id="rusted-del-confirm">
+                    <i class="fa fa-trash-o"></i> Download &amp; delete
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 (function () {
     const RUSTED = {
@@ -106,7 +140,7 @@
         document.getElementById('rusted-do-backup').addEventListener('click', doBackup);
         document.getElementById('rusted-do-history').addEventListener('click', () => window.location.href = @json($configUrl));
         document.getElementById('rusted-do-toggle').addEventListener('click', doToggle);
-        document.getElementById('rusted-do-remove').addEventListener('click', doRemove);
+        document.getElementById('rusted-do-remove').addEventListener('click', openDeleteModal);
     }
 
     async function doBackup(e) {
@@ -164,12 +198,10 @@
 
     // Remove = a real delete from rusted. Since this erases the device, a full
     // archive of every configuration revision is downloaded first (so it can be
-    // re-imported later if needed) before the device is deleted.
-    async function doRemove() {
+    // re-imported later if needed); an optional checkbox purges the device's
+    // configurations from the backup git history irreversibly.
+    async function doRemove(purge) {
         if (!currentDevice) return;
-        if (!confirm('Download a backup of all configurations and DELETE this device from rusted?\n\n' +
-            'This stops backups permanently and removes the device from rusted. ' +
-            'Its configuration archive will be saved first.')) return;
 
         const filename = 'rusted-history-' + RUSTED.host + '.zip';
         try {
@@ -180,7 +212,7 @@
             return;
         }
 
-        const r = await api('DELETE', '/devices/' + dev);
+        const r = await api('DELETE', '/devices/' + dev + (purge ? '?purge=true' : ''));
         if (!r.ok) {
             alert('Delete failed: ' + ((r.data && (r.data.error || r.data.message)) || ('HTTP ' + r.status)) +
                 '\n\nThe archive was saved, but the device could not be removed.');
@@ -188,6 +220,31 @@
         }
         render();
     }
+
+    function openDeleteModal() {
+        if (!currentDevice) return;
+        document.getElementById('rusted-del-name').textContent = currentDevice.name || RUSTED.host;
+        document.getElementById('rusted-del-purge').checked = false;
+        document.getElementById('rusted-del-purge-warn').style.display = 'none';
+        document.getElementById('rusted-del-modal').style.display = 'block';
+        document.getElementById('rusted-del-backdrop').style.display = 'block';
+    }
+    function closeDeleteModal() {
+        document.getElementById('rusted-del-modal').style.display = 'none';
+        document.getElementById('rusted-del-backdrop').style.display = 'none';
+    }
+
+    document.getElementById('rusted-del-purge').addEventListener('change', function () {
+        document.getElementById('rusted-del-purge-warn').style.display = this.checked ? 'block' : 'none';
+    });
+    document.getElementById('rusted-del-cancel').addEventListener('click', closeDeleteModal);
+    document.getElementById('rusted-del-close').addEventListener('click', closeDeleteModal);
+    document.getElementById('rusted-del-backdrop').addEventListener('click', closeDeleteModal);
+    document.getElementById('rusted-del-confirm').addEventListener('click', function () {
+        const purge = document.getElementById('rusted-del-purge').checked;
+        closeDeleteModal();
+        doRemove(purge);
+    });
 
     async function renderUnmanaged() {
         const drv = await api('GET', '/drivers');

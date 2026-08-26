@@ -13,6 +13,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -265,11 +267,46 @@ func (s *Server) provisionMikrotikSSHKey(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) deleteDevice(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.DeleteDevice(r.PathValue("name")); err != nil {
+	name := r.PathValue("name")
+	// Resolve first so an unknown device 404s before anything is touched, and
+	// so the repo-relative path (group/name.cfg) is known for the git cleanup.
+	d, rel, ok := s.deviceRel(w, r)
+	if !ok {
+		return
+	}
+	// ?purge=true additionally rewrites the repository history so the device's
+	// configurations become unrecoverable (needs git-filter-repo on this host).
+	purge := r.URL.Query().Get("purge") == "true" || r.URL.Query().Get("purge") == "1"
+	log.Printf("api: deleting device %q (repo path %q, irreversible purge: %t)", name, rel, purge)
+	if purge && !gitstore.FilterRepoAvailable() {
+		log.Printf("api: purge of %q refused: git-filter-repo not runnable on this host", name)
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "purge requested but git-filter-repo is not installed on the rusted host"})
+		return
+	}
+	// Purge the device's configuration from the backup repository BEFORE
+	// dropping the database row: if the git side fails the caller gets an
+	// error and the device stays registered (history intact), instead of
+	// vanishing while its configs linger in ./backups forever.
+	if err := s.Git.RemoveDevice(rel); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device still registered; could not purge " + rel + ": " + err.Error()})
+		return
+	}
+	if purge {
+		if err := s.Git.PurgeHistory(rel); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device still registered; could not rewrite backup history for " + rel + ": " + err.Error()})
+			return
+		}
+		// The rewrite changed every commit hash; keep recorded runs of the
+		// OTHER devices pointing at valid commits. Best-effort on purpose.
+		if m, err := s.Git.CommitMap(); err == nil && len(m) > 0 {
+			_ = s.Store.RemapRunCommits(m)
+		}
+	}
+	if err := s.Store.DeleteDevice(d.Name); err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "purged": fmt.Sprintf("%t", purge)})
 }
 
 func (s *Server) deviceHistory(w http.ResponseWriter, r *http.Request) {
@@ -321,33 +358,29 @@ func (s *Server) deviceConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // deviceVersions lists the git history of a device's config file (one entry per
-// change), newest first, so the UI can pick versions to view or diff.
+// change), newest first, so the UI can pick versions to view or diff. Each
+// entry carries the full capture timestamp and author, which exports embed in
+// their manifest.
 func (s *Server) deviceVersions(w http.ResponseWriter, r *http.Request) {
 	_, rel, ok := s.deviceRel(w, r)
 	if !ok {
 		return
 	}
-	lines, err := s.Git.Log(rel, 100)
+	entries, err := s.Git.LogDetailed(rel, 1000)
 	if err != nil {
 		writeJSON(w, http.StatusOK, []any{}) // no history yet
 		return
 	}
 	type version struct {
-		Commit  string `json:"commit"`
-		Date    string `json:"date"`
-		Subject string `json:"subject"`
+		Commit     string `json:"commit"`
+		Date       string `json:"date"`        // YYYY-MM-DD (kept for the existing UI)
+		CapturedAt string `json:"captured_at"` // RFC3339 with offset
+		Author     string `json:"author"`
+		Subject    string `json:"subject"`
 	}
-	out := make([]version, 0, len(lines))
-	for _, ln := range lines {
-		// "<hash> <YYYY-MM-DD> <subject...>"
-		parts := strings.SplitN(ln, " ", 3)
-		if len(parts) < 2 {
-			continue
-		}
-		v := version{Commit: parts[0], Date: parts[1]}
-		if len(parts) == 3 {
-			v.Subject = parts[2]
-		}
+	out := make([]version, 0, len(entries))
+	for _, e := range entries {
+		v := version{Commit: e.Commit, Date: e.Date[:min(10, len(e.Date))], CapturedAt: e.Date, Author: e.Author, Subject: e.Subject}
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)

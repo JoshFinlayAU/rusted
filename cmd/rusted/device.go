@@ -1,11 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 
+	"github.com/athenanetworks/rusted/internal/gitstore"
 	"github.com/athenanetworks/rusted/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -184,25 +188,90 @@ func deviceUpdateCmd() *cobra.Command {
 	return cmd
 }
 
+// lookupDevice finds a device by NAME, tolerating the repository-relative
+// config path the operator sees on disk ("[group/]NAME.cfg"), and wraps
+// misses in an error that names what was not found.
+func lookupDevice(st *store.Store, arg string) (*store.Device, error) {
+	dev, err := st.GetDevice(arg)
+	if err == nil {
+		return dev, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	if strings.HasSuffix(arg, ".cfg") {
+		// Same device, spelled as its backup file ("group/name.cfg").
+		if dev, err := st.GetDevice(filepath.Base(strings.TrimSuffix(arg, ".cfg"))); err == nil {
+			return dev, nil
+		}
+	}
+	return nil, fmt.Errorf("device %q not found (use the device name, e.g. %q)", arg, strings.TrimSuffix(filepath.Base(arg), ".cfg"))
+}
+
 func deviceRemoveCmd() *cobra.Command {
-	return &cobra.Command{
+	var purgeHistory bool
+	cmd := &cobra.Command{
 		Use:     "remove NAME",
 		Aliases: []string{"rm", "delete"},
 		Short:   "Remove a device and its history",
-		Args:    cobra.ExactArgs(1),
+		Long: "Remove a device, its run history and its configuration file from the\n" +
+			"backup git repository. NAME is the device name; the config file path as\n" +
+			"shown in ./backups ([group/]NAME.cfg) is accepted too.\n" +
+			"With --purge-history the configurations are also erased from the\n" +
+			"repository's history itself (irreversible; requires the git-filter-repo\n" +
+			"command and rewrites every commit hash).",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			st, err := openStore()
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			if err := st.DeleteDevice(args[0]); err != nil {
+
+			// Resolve before touching anything: unknown names fail cleanly and
+			// the repo-relative path (group/name.cfg) is needed for git.
+			dev, err := lookupDevice(st, args[0])
+			if err != nil {
 				return err
 			}
-			fmt.Printf("device %q removed\n", args[0])
+			rel := dev.Name + ".cfg"
+			if dev.Group != "" {
+				rel = dev.Group + "/" + rel
+			}
+
+			if purgeHistory && !gitstore.FilterRepoAvailable() {
+				return fmt.Errorf("--purge-history requires git-filter-repo, which is not installed on this host")
+			}
+
+			gs, err := openGit()
+			if err != nil {
+				return err
+			}
+
+			// Git first (loud failure leaves the device registered), DB after.
+			if err := gs.RemoveDevice(rel); err != nil {
+				return fmt.Errorf("device still registered; could not remove %s: %w", rel, err)
+			}
+			if purgeHistory {
+				if err := gs.PurgeHistory(rel); err != nil {
+					return fmt.Errorf("device still registered; could not rewrite backup history for %s: %w", rel, err)
+				}
+				// Keep other devices' recorded run hashes valid after the rewrite.
+				if m, err := gs.CommitMap(); err == nil && len(m) > 0 {
+					_ = st.RemapRunCommits(m)
+				}
+				fmt.Printf("history of %s irreversibly purged from the backup repository\n", rel)
+			}
+			if err := st.DeleteDevice(dev.Name); err != nil {
+				return err
+			}
+			fmt.Printf("device %q removed\n", dev.Name)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&purgeHistory, "purge-history", false,
+		"also erase this device's configs from the backup repository history (irreversible, needs git-filter-repo)")
+	return cmd
 }
 
 func deviceEnableCmd(enable bool) *cobra.Command {

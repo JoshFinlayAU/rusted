@@ -151,3 +151,139 @@ func (s *Store) Log(relPath string, n int) ([]string, error) {
 	}
 	return strings.Split(out, "\n"), nil
 }
+
+// LogEntry is one revision of a file, with the metadata needed to tell WHEN a
+// configuration was captured and by whom.
+type LogEntry struct {
+	Commit  string // abbreviated commit hash
+	Author  string // commit author name
+	Date    string // author date, RFC3339 with local offset
+	Subject string // commit subject line
+}
+
+// LogDetailed is like Log but returns structured entries including the full
+// timestamp and author, so exports can state exactly when each version was
+// stored. Newest first. Removal commits (a deleted device) are excluded, so
+// callers only ever see revisions where the configuration actually existed.
+func (s *Store) LogDetailed(relPath string, n int) ([]LogEntry, error) {
+	// "|" separates fields; it cannot appear in %h/%aI and is rare enough in
+	// names/subjects that SplitN(…, 4) keeps any later pipes inside Subject.
+	const sep = "|"
+	out, err := s.git("log", fmt.Sprintf("-n%d", n),
+		"--diff-filter=d", // skip commits that deleted the path
+		"--pretty=format:%h"+sep+"%an"+sep+"%aI"+sep+"%s", "--", relPath)
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	var entries []LogEntry
+	for _, ln := range strings.Split(out, "\n") {
+		parts := strings.SplitN(ln, sep, 4)
+		if len(parts) < 4 {
+			continue
+		}
+		entries = append(entries, LogEntry{Commit: parts[0], Author: parts[1], Date: parts[2], Subject: parts[3]})
+	}
+	return entries, nil
+}
+
+// RemoveDevice deletes relPath from the repository and commits the removal,
+// pruning parent directories that became empty. A path that was never backed
+// up (or already gone) is not an error, so deletes stay idempotent.
+func (s *Store) RemoveDevice(relPath string) error {
+	relPath = filepath.Clean(relPath)
+	if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) || relPath == "." {
+		return fmt.Errorf("invalid backup path %q", relPath)
+	}
+	full := filepath.Join(s.Dir, relPath)
+	if _, err := os.Stat(full); err != nil {
+		if os.IsNotExist(err) {
+			return nil // never backed up / already removed
+		}
+		return err
+	}
+	if _, err := s.git("rm", "-rf", "-q", "--", relPath); err != nil {
+		return fmt.Errorf("removing %s from the backup repository: %w", relPath, err)
+	}
+	if _, err := s.git("commit", "-m", "Remove backup of "+relPath); err != nil {
+		return fmt.Errorf("committing removal of %s: %w", relPath, err)
+	}
+	s.pruneEmptyParents(full)
+	return nil
+}
+
+// FilterRepoAvailable reports whether the "git filter-repo" subcommand can be
+// run on this host. PurgeHistory needs it and refuses to run without. The
+// probe mirrors how PurgeHistory invokes it: git resolves external
+// subcommands through its own exec-path too, so a bare PATH lookup would miss
+// distro installs that only git can see.
+func FilterRepoAvailable() bool {
+	return exec.Command("git", "filter-repo", "--version").Run() == nil
+}
+
+// PurgeHistory irreversibly erases relPath from EVERY commit of the repository
+// by rewriting history with "git filter-repo --path <rel> --invert-paths".
+// Unlike RemoveDevice (which only hides the file going forward), afterwards
+// even "git show <old-commit>:<rel>" finds nothing. This rewrites all commit
+// hashes; use CommitMap afterwards to remap references stored elsewhere.
+// The device's file must have been removed from HEAD first (RemoveDevice) or
+// be absent already; a missing path is fine, filter-repo still cleans history.
+func (s *Store) PurgeHistory(relPath string) error {
+	if !FilterRepoAvailable() {
+		return errors.New("irreversible purge requires git-filter-repo, which is not installed on this host (e.g. \"pip install git-filter-repo\" or your distro's package)")
+	}
+	relPath = filepath.Clean(relPath)
+	if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) || relPath == "." {
+		return fmt.Errorf("invalid backup path %q", relPath)
+	}
+	// --force is required because ./backups is a working repository, not a
+	// fresh clone as filter-repo prefers. There is no remote here to lose.
+	if _, err := s.git("filter-repo", "--path", relPath, "--invert-paths", "--force"); err != nil {
+		return fmt.Errorf("rewriting history without %s: %w", relPath, err)
+	}
+	s.pruneEmptyParents(filepath.Join(s.Dir, relPath))
+	return nil
+}
+
+// CommitMap parses the old→new commit-hash map that git-filter-repo leaves in
+// .git/filter-repo/commit-map after a rewrite ("old new" per line, "-" for
+// commits that were dropped). Callers use it to keep stored references (e.g.
+// recorded backup-run hashes) pointing at the rewritten history.
+func (s *Store) CommitMap() (map[string]string, error) {
+	b, err := os.ReadFile(filepath.Join(s.Dir, ".git", "filter-repo", "commit-map"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no rewrite has happened here
+		}
+		return nil, err
+	}
+	m := make(map[string]string)
+	for _, ln := range strings.Split(string(b), "\n") {
+		parts := strings.Fields(ln)
+		if len(parts) != 2 || parts[0] == "old" || parts[0] == parts[1] {
+			continue // header line or unchanged hash
+		}
+		// Dropped commits map to "-" (filter-repo <2.x wording) or to the
+		// all-zero hash; either way there is no new commit to point at.
+		if parts[1] == "-" || strings.Trim(parts[1], "0") == "" {
+			continue
+		}
+		m[parts[0]] = parts[1]
+	}
+	return m, nil
+}
+
+// pruneEmptyParents removes directories above full (exclusive) that held only
+// this file, up to the repo root which is never touched.
+func (s *Store) pruneEmptyParents(full string) {
+	dir := filepath.Dir(full)
+	for dir != s.Dir && strings.HasPrefix(dir, s.Dir) {
+		if err := os.Remove(dir); err != nil {
+			break // not empty or unreadable: keep it
+		}
+		dir = filepath.Dir(dir)
+	}
+}

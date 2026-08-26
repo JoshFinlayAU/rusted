@@ -125,6 +125,11 @@ rusted backup run --all
 # Inspect results
 rusted backup history nexus1
 git -C "$(rusted config show | awk '/backups:/{print $2}')" log --oneline
+
+# Delete a device: its config file is removed from the backup repository too.
+# Add --purge-history to also rewrite the repository so no trace of the
+# device's configurations remains (irreversible; requires git-filter-repo).
+rusted device remove ios-1 --purge-history
 ```
 
 ## Command reference
@@ -172,8 +177,9 @@ All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
 | `GET /api/devices` | List devices (includes `last_backup` timestamp + `last_status` of the most recent run) |
 | `POST /api/devices` | Add or re-register a device (JSON; upsert on name) |
 | `GET /api/devices/{name}` | Device detail |
-| `DELETE /api/devices/{name}` | Remove a device |
+| `DELETE /api/devices/{name}` | Remove a device, its run history **and its config file from the backup repository** (a removal commit is recorded). Add `?purge=true` to also erase every stored version from the repository's git history — irreversible, needs `git-filter-repo`, rewrites all commit hashes (recorded run hashes are remapped automatically); answers 501 if the tool is missing |
 | `GET /api/devices/{name}/history` | Backup history (50 most recent runs) |
+| `GET /api/devices/{name}/versions` | Git revisions of the device's config, newest first: `commit`, `date`, `captured_at` (RFC3339), `author`, `subject` |
 | `GET /api/devices/{name}/config` | Latest stored config (text) |
 | `POST /api/devices/{name}/backup` | Trigger a backup now |
 | `GET /api/credentials` | List credentials (no secrets returned) |

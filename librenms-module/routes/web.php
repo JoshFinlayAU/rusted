@@ -33,6 +33,9 @@ Route::middleware(['web', 'auth'])->prefix('plugin/rusted')->name('rusted.')->gr
         Route::get('devices/{name}/history', [RustedController::class, 'apiHistory'])->name('devices.history');
         Route::get('devices/{name}/history/zip', [RustedController::class, 'apiHistoryZip'])->name('devices.history.zip');
 
+        // Bulk export: EVERY device's full configuration history in one zip.
+        Route::get('export/zip', [RustedController::class, 'apiExportZip'])->name('export.zip');
+
         // Configuration retrieval, revision listing and diffing. These return
         // text/plain bodies, so they are relayed via proxyText() rather than
         // proxy(), to avoid corrupting the raw config/diff payload.
