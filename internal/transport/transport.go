@@ -7,9 +7,13 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,9 +25,25 @@ type Target struct {
 	Port       int
 	Username   string
 	Password   string
-	PrivateKey []byte // optional PEM private key
-	Enable     string // optional privileged-mode password
-	Timeout    time.Duration
+	PrivateKey []byte        // optional PEM private key
+	Enable     string        // optional privileged-mode password
+	Timeout    time.Duration // dial/connect timeout (SSH handshake, TCP connect)
+	// CmdTimeout is the hard timeout for a single SendCommand call. Zero means
+	// the engine default (60s). Override for slow devices that take longer to
+	// emit their full config.
+	CmdTimeout time.Duration
+	// IdleTimeout is the idle window after which a non-prompting stream is
+	// considered complete (default 700ms). Increase for devices that pause
+	// mid-output for longer than 700ms.
+	IdleTimeout time.Duration
+	// Debug, when non-nil, receives every raw byte read from and written to
+	// the device, prefixed with <<< and >>> respectively. Set by --debug (-vv).
+	Debug io.Writer
+	// RawOutput disables the transport's output normalisation (CRLF folding,
+	// ANSI stripping). Set for drivers whose capture must stay byte-exact —
+	// e.g. OpenWrt, which pulls binary files over the exec channel and lets
+	// the driver post-process them.
+	RawOutput bool
 }
 
 // Session is an open interactive connection to a device.
@@ -81,4 +101,45 @@ func Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// lastLine returns the final non-empty line of b with trailing whitespace
+// removed. Used for pager-prompt detection.
+func lastLine(b []byte) string {
+	s := strings.TrimRight(string(b), " \t\r\n")
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
+}
+
+// trailingMatches reports whether re matches a bare prompt at the very end of
+// b: the final (unterminated) line, ignoring trailing spaces/tabs. A real CLI
+// prompt is emitted WITHOUT a terminating newline — the device prints it and
+// waits for input — whereas every content line ends in \n. Anchoring here
+// keeps prompt-shaped content lines (banners, FortiGate replacement-message
+// HTML, motd) from completing a command mid-dump.
+func trailingMatches(b []byte, re *regexp.Regexp) bool {
+	t := bytes.TrimRight(b, " \t")
+	if len(t) == 0 || t[len(t)-1] == '\n' || t[len(t)-1] == '\r' {
+		return false
+	}
+	line := t
+	if i := bytes.LastIndexByte(t, '\n'); i >= 0 {
+		line = t[i+1:]
+	}
+	return re.Match(line)
+}
+
+// endsWithPrompt reports whether b ends with a bare device prompt.
+func endsWithPrompt(b []byte) bool { return trailingMatches(b, promptRe) }
+
+// endsWithPrivilegedPrompt reports whether b ends with a bare "#" prompt.
+func endsWithPrivilegedPrompt(b []byte) bool { return trailingMatches(b, privilegedPromptRe) }
+
+// endsWithPasswordPrompt reports whether b ends with a bare Password:/Passphrase:
+// prompt (colon required, so config text mentioning "password" cannot trigger it).
+func endsWithPasswordPrompt(b []byte) bool {
+	s := strings.TrimRight(string(b), " \t\r\n")
+	return passwordPrompt.MatchString(s)
 }

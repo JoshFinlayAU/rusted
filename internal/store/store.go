@@ -37,12 +37,22 @@ type Device struct {
 	Host         string
 	Port         int
 	Driver       string
-	Transport    string // transport name (e.g. "routeros-api"); "" = engine default (ssh)
+	Transport    string // transport name (e.g. "routeros-api", "telnet"); "" = engine default (ssh)
+	CmdTimeout   int    // per-command hard timeout in seconds; 0 = engine default (60s)
+	IdleTimeout  int    // idle window in ms before considering output complete; 0 = default (700ms)
 	CredentialID int64
 	Group        string // sub-directory within the backup repo
 	Enabled      bool
 	// Credential is populated by lookups that join (may be nil).
 	Credential *Credential
+	// LastBackup is the timestamp of the most recent backup run (nil if none).
+	// Populated by ListDevicesWithStatus.
+	LastBackup *time.Time
+	// LastStatus is the status of the most recent backup run ("success",
+	// "unchanged", "failed", or "" if no runs exist).
+	LastStatus string
+	// CredentialName is populated by ListDevicesWithStatus (LEFT JOIN).
+	CredentialName string
 }
 
 // BackupRun records the outcome of a single backup attempt.
@@ -93,6 +103,8 @@ CREATE TABLE IF NOT EXISTS devices (
     port          INTEGER NOT NULL DEFAULT 22,
     driver        TEXT NOT NULL DEFAULT 'generic',
     transport     TEXT NOT NULL DEFAULT '',
+    cmd_timeout   INTEGER NOT NULL DEFAULT 0,
+    idle_timeout  INTEGER NOT NULL DEFAULT 0,
     credential_id INTEGER NOT NULL REFERENCES credentials(id),
     "group"       TEXT NOT NULL DEFAULT '',
     enabled       INTEGER NOT NULL DEFAULT 1
@@ -115,6 +127,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_device ON backup_runs(device_id, started_at 
 	// Additive migrations for databases created before a column existed
 	// (CREATE TABLE IF NOT EXISTS never adds columns to an existing table).
 	s.addColumnIfMissing("devices", "transport", "TEXT NOT NULL DEFAULT ''")
+	s.addColumnIfMissing("devices", "cmd_timeout", "INTEGER NOT NULL DEFAULT 0")
+	s.addColumnIfMissing("devices", "idle_timeout", "INTEGER NOT NULL DEFAULT 0")
 	return nil
 }
 
@@ -244,24 +258,25 @@ func (s *Store) CreateDevice(d *Device) (int64, error) {
 	// Upsert on the unique name so a re-register (the caller syncs state before every
 	// backup) updates host/driver/transport/credential/enabled instead of failing.
 	res, err := s.db.Exec(
-		`INSERT INTO devices (name, host, port, driver, transport, credential_id, "group", enabled)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO devices (name, host, port, driver, transport, cmd_timeout, idle_timeout, credential_id, "group", enabled)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   host=excluded.host, port=excluded.port, driver=excluded.driver,
-		   transport=excluded.transport, credential_id=excluded.credential_id,
+		   transport=excluded.transport, cmd_timeout=excluded.cmd_timeout,
+		   idle_timeout=excluded.idle_timeout, credential_id=excluded.credential_id,
 		   "group"=excluded."group", enabled=excluded.enabled`,
-		d.Name, d.Host, d.Port, d.Driver, d.Transport, d.CredentialID, d.Group, d.Enabled)
+		d.Name, d.Host, d.Port, d.Driver, d.Transport, d.CmdTimeout, d.IdleTimeout, d.CredentialID, d.Group, d.Enabled)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-const deviceCols = `d.id, d.name, d.host, d.port, d.driver, d.transport, d.credential_id, d."group", d.enabled`
+const deviceCols = `d.id, d.name, d.host, d.port, d.driver, d.transport, d.cmd_timeout, d.idle_timeout, d.credential_id, d."group", d.enabled`
 
 func scanDevice(row interface{ Scan(...any) error }) (*Device, error) {
 	var d Device
-	if err := row.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CredentialID, &d.Group, &d.Enabled); err != nil {
+	if err := row.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CmdTimeout, &d.IdleTimeout, &d.CredentialID, &d.Group, &d.Enabled); err != nil {
 		return nil, err
 	}
 	return &d, nil
@@ -309,9 +324,146 @@ func (s *Store) ListDevices() ([]*Device, error) {
 	return out, rows.Err()
 }
 
+// ListDevicesWithStatus is like ListDevices but also populates LastBackup and
+// LastStatus from the most recent backup run per device.
+func (s *Store) ListDevicesWithStatus() ([]*Device, error) {
+	rows, err := s.db.Query(`SELECT ` + deviceCols + `,
+		(SELECT r.started_at FROM backup_runs r WHERE r.device_id = d.id ORDER BY r.id DESC LIMIT 1),
+		(SELECT r.status FROM backup_runs r WHERE r.device_id = d.id ORDER BY r.id DESC LIMIT 1),
+		c.name
+		FROM devices d
+		LEFT JOIN credentials c ON c.id = d.credential_id
+		ORDER BY d.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Device
+	for rows.Next() {
+		var d Device
+		var lastAt sql.NullTime
+		var lastStatus sql.NullString
+		var credName sql.NullString
+		if err := rows.Scan(
+			&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport,
+			&d.CmdTimeout, &d.IdleTimeout, &d.CredentialID, &d.Group, &d.Enabled,
+			&lastAt, &lastStatus, &credName,
+		); err != nil {
+			return nil, err
+		}
+		if lastAt.Valid {
+			d.LastBackup = &lastAt.Time
+		}
+		if lastStatus.Valid {
+			d.LastStatus = lastStatus.String
+		}
+		if credName.Valid {
+			d.CredentialName = credName.String
+		}
+		out = append(out, &d)
+	}
+	return out, rows.Err()
+}
+
 // SetDeviceEnabled toggles a device's enabled flag.
 func (s *Store) SetDeviceEnabled(name string, enabled bool) error {
 	res, err := s.db.Exec(`UPDATE devices SET enabled = ? WHERE name = ?`, enabled, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceHost updates a device's host.
+func (s *Store) UpdateDeviceHost(name, host string) error {
+	res, err := s.db.Exec(`UPDATE devices SET host = ? WHERE name = ?`, host, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDevicePort updates a device's port.
+func (s *Store) UpdateDevicePort(name string, port int) error {
+	res, err := s.db.Exec(`UPDATE devices SET port = ? WHERE name = ?`, port, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceDriver updates a device's driver.
+func (s *Store) UpdateDeviceDriver(name, driver string) error {
+	res, err := s.db.Exec(`UPDATE devices SET driver = ? WHERE name = ?`, driver, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceTransport updates a device's transport.
+func (s *Store) UpdateDeviceTransport(name, transport string) error {
+	res, err := s.db.Exec(`UPDATE devices SET transport = ? WHERE name = ?`, transport, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceCmdTimeout updates a device's per-command timeout (seconds).
+func (s *Store) UpdateDeviceCmdTimeout(name string, seconds int) error {
+	res, err := s.db.Exec(`UPDATE devices SET cmd_timeout = ? WHERE name = ?`, seconds, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceIdleTimeout updates a device's idle timeout (milliseconds).
+func (s *Store) UpdateDeviceIdleTimeout(name string, ms int) error {
+	res, err := s.db.Exec(`UPDATE devices SET idle_timeout = ? WHERE name = ?`, ms, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceCredential repoints a device to a different credential.
+func (s *Store) UpdateDeviceCredential(name string, credID int64) error {
+	res, err := s.db.Exec(`UPDATE devices SET credential_id = ? WHERE name = ?`, credID, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDeviceGroup updates a device's group.
+func (s *Store) UpdateDeviceGroup(name, group string) error {
+	res, err := s.db.Exec(`UPDATE devices SET "group" = ? WHERE name = ?`, group, name)
 	if err != nil {
 		return err
 	}
@@ -341,6 +493,18 @@ func (s *Store) RecordRun(r *BackupRun) error {
 		`INSERT INTO backup_runs (device_id, started_at, finished_at, status, message, bytes, commit_hash) VALUES (?,?,?,?,?,?,?)`,
 		r.DeviceID, r.StartedAt, r.FinishedAt, r.Status, r.Message, r.Bytes, r.Commit)
 	return err
+}
+
+// RemapRunCommits rewrites recorded commit hashes after a history rewrite
+// (git filter-repo), so the runs of surviving devices still point at valid
+// commits. Best-effort by design: unknown/unchanged hashes are simply left.
+func (s *Store) RemapRunCommits(mapping map[string]string) error {
+	for oldHash, newHash := range mapping {
+		if _, err := s.db.Exec(`UPDATE backup_runs SET commit_hash = ? WHERE commit_hash = ?`, newHash, oldHash); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // History returns backup runs for a device (most recent first), limited to

@@ -25,6 +25,7 @@ class DeviceOverview implements DeviceOverviewHook
     {
         return view("$pluginName::device-overview", [
             'hostname' => $device->hostname,
+            'configUrl' => route('rusted.device.show', $device->hostname),
         ]);
     }
 }
