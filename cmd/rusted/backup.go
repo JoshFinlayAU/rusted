@@ -20,7 +20,7 @@ func backupCmd() *cobra.Command {
 }
 
 func backupRunCmd() *cobra.Command {
-	var all bool
+	var all, verbose, debug, raw bool
 	cmd := &cobra.Command{
 		Use:   "run [NAME]",
 		Short: "Back up a device (or --all enabled devices)",
@@ -38,6 +38,15 @@ func backupRunCmd() *cobra.Command {
 				return err
 			}
 			eng := backup.New(st, gs)
+			if verbose || debug {
+				eng.Log = os.Stderr
+			}
+			if debug {
+				eng.Debug = os.Stderr
+			}
+			if raw {
+				eng.Raw = true
+			}
 			ctx := context.Background()
 
 			var results []*backup.Result
@@ -64,17 +73,22 @@ func backupRunCmd() *cobra.Command {
 				}
 				if r.Status == "failed" {
 					failed++
+					fmt.Fprintf(os.Stderr, "FAIL %s: %s\n", r.Device, r.Message)
 				}
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Device, r.Status, dash(commit), r.Message)
 			}
 			tw.Flush()
 			if failed > 0 {
+				fmt.Fprintf(os.Stderr, "\n%d device(s) failed. Run 'rusted backup history NAME' for details.\n", failed)
 				return fmt.Errorf("%d device(s) failed", failed)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "back up all enabled devices")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print progress to stderr")
+	cmd.Flags().BoolVar(&debug, "debug", false, "print raw device I/O to stderr (implies -v)")
+	cmd.Flags().BoolVar(&raw, "raw", false, "save the captured config verbatim: skip volatile-line stripping and masking")
 	return cmd
 }
 

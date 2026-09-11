@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -28,11 +30,19 @@ func (*SSHExec) Dial(ctx context.Context, t Target) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &execSession{client: client}, nil
+	return &execSession{client: client, raw: t.RawOutput, debug: t.Debug}, nil
 }
 
 type execSession struct {
 	client *ssh.Client
+	raw    bool      // skip output normalisation (byte-exact capture)
+	debug  io.Writer // --debug I/O trace (nil = silent)
+}
+
+func (s *execSession) debugf(format string, args ...any) {
+	if s.debug != nil {
+		fmt.Fprintf(s.debug, format, args...)
+	}
 }
 
 // SendCommand runs cmd in a new exec channel and returns its stdout. No prompt
@@ -41,6 +51,7 @@ type execSession struct {
 // (some CLIs exit non-zero even on a good read); only an error with no output
 // is surfaced.
 func (s *execSession) SendCommand(cmd string) (string, error) {
+	s.debugf(">>> %s\n", cmd)
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return "", err
@@ -48,7 +59,13 @@ func (s *execSession) SendCommand(cmd string) (string, error) {
 	defer sess.Close()
 
 	out, runErr := sess.Output(cmd)
-	text := cleanExec(string(out))
+	text := string(out)
+	if !s.raw {
+		// Without a PTY the stream is already byte-exact; normalisation is
+		// only for platforms that still emit CRLF/ANSI on exec channels.
+		text = cleanExec(text)
+	}
+	s.debugf("<<< %s\n", text)
 	if runErr != nil && strings.TrimSpace(text) == "" {
 		return "", runErr
 	}
