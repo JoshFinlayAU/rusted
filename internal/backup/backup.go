@@ -37,6 +37,59 @@ type Result struct {
 	Bytes   int    `json:"bytes"`
 }
 
+// ExecuteResult is the bounded result of one arbitrary SSH exec command.
+type ExecuteResult struct {
+	Device     string `json:"device"`
+	Status     string `json:"status"`
+	Output     string `json:"output"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+// ExecuteDevice runs one command through Rusted's non-interactive SSH exec
+// transport. It deliberately does not use a platform driver's backup commands.
+func (e *Engine) ExecuteDevice(ctx context.Context, name, command string, timeout time.Duration) (*ExecuteResult, error) {
+	started := time.Now()
+	res := &ExecuteResult{Device: name}
+	finish := func(status, output string) (*ExecuteResult, error) {
+		res.Status, res.Output = status, output
+		res.DurationMS = time.Since(started).Milliseconds()
+		return res, nil
+	}
+
+	dev, err := e.Store.GetDevice(name)
+	if err != nil {
+		return nil, err
+	}
+	if dev.Credential == nil {
+		return finish("failed", "device has no credential")
+	}
+	tr, err := transport.Get("ssh-exec")
+	if err != nil {
+		return finish("failed", err.Error())
+	}
+	if timeout <= 0 {
+		timeout = e.Timeout
+	}
+	tgt := transport.Target{
+		Name: dev.Name, Host: dev.Host, Port: dev.Port,
+		Username: dev.Credential.Username, Password: dev.Credential.Password,
+		PrivateKey: []byte(dev.Credential.PrivateKey), Enable: dev.Credential.Enable,
+		Timeout: timeout,
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	sess, err := tr.Dial(dialCtx, tgt)
+	if err != nil {
+		return finish("failed", "connect: "+err.Error())
+	}
+	defer sess.Close()
+	out, err := sess.SendCommand(command)
+	if err != nil {
+		return finish("failed", out+"\n"+err.Error())
+	}
+	return finish("success", out)
+}
+
 // BackupDevice backs up one device by name and records the run.
 func (e *Engine) BackupDevice(ctx context.Context, name string) (*Result, error) {
 	dev, err := e.Store.GetDevice(name)
