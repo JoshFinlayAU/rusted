@@ -63,6 +63,7 @@ func configInitCmd() *cobra.Command {
 				APIAddr:  ":8080",
 				APIToken: token,
 				Secret:   sec,
+				APIExec:  existing.APIExec,
 			}
 
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

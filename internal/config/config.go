@@ -32,6 +32,8 @@ type Config struct {
 	APIAddr  string
 	APIToken string
 	Secret   string
+	// APIExec enables the API's ad-hoc command endpoint (api_exec = true).
+	APIExec bool
 
 	// Path is the config file that was loaded, or "" if none was found.
 	Path string
@@ -120,6 +122,17 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("RUSTED_SECRET"); v != "" {
 		c.Secret = v
 	}
+	if v := os.Getenv("RUSTED_API_EXEC"); v != "" {
+		c.APIExec = parseBool(v)
+	}
+}
+
+func parseBool(v string) bool {
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func parseFile(path string, c *Config) error {
@@ -152,6 +165,8 @@ func parseFile(path string, c *Config) error {
 			c.APIToken = val
 		case "secret":
 			c.Secret = val
+		case "api_exec":
+			c.APIExec = parseBool(val)
 		}
 	}
 	return sc.Err()
@@ -167,6 +182,9 @@ func (c Config) Render() string {
 	fmt.Fprintf(&b, "api_addr  = %q\n", c.APIAddr)
 	fmt.Fprintf(&b, "api_token = %q\n", c.APIToken)
 	fmt.Fprintf(&b, "secret    = %q\n", c.Secret)
+	if c.APIExec {
+		b.WriteString("api_exec  = true\n")
+	}
 	return b.String()
 }
 

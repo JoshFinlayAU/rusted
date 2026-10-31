@@ -37,57 +37,59 @@ type Result struct {
 	Bytes   int    `json:"bytes"`
 }
 
-// ExecuteResult is the bounded result of one arbitrary SSH exec command.
+// MaxExecuteOutput caps the output ExecuteDevice keeps from one command.
+const MaxExecuteOutput = 32 << 10
+
+// ExecuteResult is the bounded result of one ad-hoc command run on a device.
 type ExecuteResult struct {
 	Device     string `json:"device"`
-	Status     string `json:"status"`
+	Status     string `json:"status"` // "success", "failed"
 	Output     string `json:"output"`
+	Error      string `json:"error,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
 }
 
-// ExecuteDevice runs one command through Rusted's non-interactive SSH exec
-// transport. It deliberately does not use a platform driver's backup commands.
-func (e *Engine) ExecuteDevice(ctx context.Context, name, command string, timeout time.Duration) (*ExecuteResult, error) {
-	started := time.Now()
-	res := &ExecuteResult{Device: name}
-	finish := func(status, output string) (*ExecuteResult, error) {
-		res.Status, res.Output = status, output
-		res.DurationMS = time.Since(started).Milliseconds()
-		return res, nil
-	}
-
+// ExecuteDevice runs one non-interactive command on a device over an ssh-exec
+// channel, whatever transport its backups use. ctx bounds the whole call,
+// connect included. Nothing is recorded as a backup run or committed.
+func (e *Engine) ExecuteDevice(ctx context.Context, name, command string) (*ExecuteResult, error) {
 	dev, err := e.Store.GetDevice(name)
 	if err != nil {
 		return nil, err
 	}
+	started := time.Now()
+	res := &ExecuteResult{Device: dev.Name}
+	finish := func(out string, err error) (*ExecuteResult, error) {
+		res.Status, res.Output = "success", out
+		if err != nil {
+			res.Status, res.Error = "failed", err.Error()
+		}
+		res.DurationMS = time.Since(started).Milliseconds()
+		return res, nil
+	}
+
 	if dev.Credential == nil {
-		return finish("failed", "device has no credential")
+		return finish("", fmt.Errorf("device has no credential"))
 	}
 	tr, err := transport.Get("ssh-exec")
 	if err != nil {
-		return finish("failed", err.Error())
+		return finish("", err)
 	}
-	if timeout <= 0 {
-		timeout = e.Timeout
-	}
-	tgt := transport.Target{
+	sess, err := tr.Dial(ctx, transport.Target{
 		Name: dev.Name, Host: dev.Host, Port: dev.Port,
 		Username: dev.Credential.Username, Password: dev.Credential.Password,
 		PrivateKey: []byte(dev.Credential.PrivateKey), Enable: dev.Credential.Enable,
-		Timeout: timeout,
-	}
-	dialCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	sess, err := tr.Dial(dialCtx, tgt)
+		Timeout: e.Timeout,
+	})
 	if err != nil {
-		return finish("failed", "connect: "+err.Error())
+		return finish("", fmt.Errorf("connect: %w", err))
 	}
 	defer sess.Close()
-	out, err := sess.SendCommand(command)
-	if err != nil {
-		return finish("failed", out+"\n"+err.Error())
+	ex, ok := sess.(transport.Executor)
+	if !ok {
+		return finish("", fmt.Errorf("transport %s cannot run ad-hoc commands", tr.Name()))
 	}
-	return finish("success", out)
+	return finish(ex.Exec(ctx, command, MaxExecuteOutput))
 }
 
 // BackupDevice backs up one device by name and records the run.

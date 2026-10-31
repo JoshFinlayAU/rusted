@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -69,6 +70,86 @@ func (s *execSession) SendCommand(cmd string) (string, error) {
 
 // Close implements Session.
 func (s *execSession) Close() error { return s.client.Close() }
+
+// Exec implements Executor. stdout and stderr share one capped buffer, like
+// `cmd 2>&1`, so a device's error text lands next to whatever it printed first.
+// The command is cut off when ctx ends or the output passes limit bytes, and
+// every failure - including a non-zero exit - is reported alongside the
+// partial output.
+func (s *execSession) Exec(ctx context.Context, cmd string, limit int) (string, error) {
+	sess, err := s.client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer sess.Close()
+
+	out := newCappedBuffer(limit)
+	sess.Stdout, sess.Stderr = out, out
+	if err := sess.Start(cmd); err != nil {
+		return "", err
+	}
+	done := make(chan error, 1)
+	go func() { done <- sess.Wait() }()
+
+	var runErr error
+	select {
+	case runErr = <-done:
+	case <-out.full:
+		sess.Close()
+		<-done
+	case <-ctx.Done():
+		sess.Close()
+		<-done
+		runErr = fmt.Errorf("command did not finish: %w", ctx.Err())
+	}
+
+	text := cleanExec(out.String())
+	if out.overflowed() {
+		return text + "\n[output truncated]", fmt.Errorf("%w (%d bytes)", ErrOutputLimit, limit)
+	}
+	return text, runErr
+}
+
+// cappedBuffer keeps the first limit bytes written to it and closes full once
+// anything beyond that arrives. ssh copies stdout and stderr on separate
+// goroutines, hence the mutex.
+type cappedBuffer struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	limit int
+	over  bool
+	full  chan struct{}
+}
+
+func newCappedBuffer(limit int) *cappedBuffer {
+	return &cappedBuffer{limit: limit, full: make(chan struct{})}
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if room := c.limit - c.buf.Len(); len(p) > room {
+		c.buf.Write(p[:max(room, 0)])
+		if !c.over {
+			c.over = true
+			close(c.full)
+		}
+		return len(p), nil
+	}
+	return c.buf.Write(p)
+}
+
+func (c *cappedBuffer) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+func (c *cappedBuffer) overflowed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.over
+}
 
 // cleanExec normalises CRLF and strips any stray ANSI (some RouterOS builds
 // colourise even a non-PTY session). ansiRe is shared from ssh.go.

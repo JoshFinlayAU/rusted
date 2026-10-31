@@ -30,6 +30,8 @@ type Server struct {
 	Git    *gitstore.Store
 	Engine *backup.Engine
 	Token  string
+	// AllowExec enables POST /api/devices/{name}/execute.
+	AllowExec bool
 }
 
 // Handler returns the configured HTTP handler (router + auth middleware).
@@ -403,12 +405,19 @@ func (s *Server) triggerBackup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// executeCommand runs one ad-hoc command on a device. It is off unless the
+// server was started with AllowExec: the token already manages credentials, but
+// this turns it into a shell on every device, which an operator should opt into.
 func (s *Server) executeCommand(w http.ResponseWriter, r *http.Request) {
+	if !s.AllowExec {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "command execution is disabled; enable it with api_exec = true or rusted serve --allow-exec"})
+		return
+	}
 	var in struct {
 		Command string `json:"command"`
 		Timeout int    `json:"timeout"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
@@ -430,7 +439,7 @@ func (s *Server) executeCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(in.Timeout)*time.Second)
 	defer cancel()
-	res, err := s.Engine.ExecuteDevice(ctx, r.PathValue("name"), in.Command, time.Duration(in.Timeout)*time.Second)
+	res, err := s.Engine.ExecuteDevice(ctx, r.PathValue("name"), in.Command)
 	if err != nil {
 		writeErr(w, err)
 		return
