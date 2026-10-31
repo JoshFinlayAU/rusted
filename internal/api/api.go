@@ -30,6 +30,8 @@ type Server struct {
 	Git    *gitstore.Store
 	Engine *backup.Engine
 	Token  string
+	// AllowExec enables POST /api/devices/{name}/execute.
+	AllowExec bool
 }
 
 // Handler returns the configured HTTP handler (router + auth middleware).
@@ -51,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/devices/{name}/versions", s.deviceVersions)
 	mux.HandleFunc("GET /api/devices/{name}/diff", s.deviceDiff)
 	mux.HandleFunc("POST /api/devices/{name}/backup", s.triggerBackup)
+	mux.HandleFunc("POST /api/devices/{name}/execute", s.executeCommand)
 	mux.HandleFunc("POST /api/provision/mikrotik-ssh-key", s.provisionMikrotikSSHKey)
 	return s.auth(mux)
 }
@@ -395,6 +398,48 @@ func (s *Server) triggerBackup(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	res, err := s.Engine.BackupDevice(ctx, name)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// executeCommand runs one ad-hoc command on a device. It is off unless the
+// server was started with AllowExec: the token already manages credentials, but
+// this turns it into a shell on every device, which an operator should opt into.
+func (s *Server) executeCommand(w http.ResponseWriter, r *http.Request) {
+	if !s.AllowExec {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "command execution is disabled; enable it with api_exec = true or rusted serve --allow-exec"})
+		return
+	}
+	var in struct {
+		Command string `json:"command"`
+		Timeout int    `json:"timeout"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	in.Command = strings.TrimSpace(in.Command)
+	if in.Command == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
+		return
+	}
+	if len(in.Command) > 4096 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is too long"})
+		return
+	}
+	if in.Timeout == 0 {
+		in.Timeout = 30
+	}
+	if in.Timeout < 1 || in.Timeout > 60 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "timeout must be between 1 and 60 seconds"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(in.Timeout)*time.Second)
+	defer cancel()
+	res, err := s.Engine.ExecuteDevice(ctx, r.PathValue("name"), in.Command)
 	if err != nil {
 		writeErr(w, err)
 		return

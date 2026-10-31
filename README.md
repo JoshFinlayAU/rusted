@@ -86,10 +86,11 @@ backups   = "/var/lib/rusted/backups"
 api_addr  = ":8080"
 api_token = "…"   # bearer token for the HTTP API / LibreNMS
 secret    = "…"   # AES-256-GCM key for credential encryption-at-rest
+# api_exec = true  # enable POST /api/devices/{name}/execute (off by default)
 ```
 
 Each key has an environment-variable equivalent: `RUSTED_DB`, `RUSTED_BACKUPS`,
-`RUSTED_API_ADDR`, `RUSTED_API_TOKEN`, `RUSTED_SECRET`.
+`RUSTED_API_ADDR`, `RUSTED_API_TOKEN`, `RUSTED_SECRET`, `RUSTED_API_EXEC`.
 
 ## Quick start
 
@@ -161,6 +162,7 @@ All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
 | `GET /api/devices/{name}/history` | Backup history |
 | `GET /api/devices/{name}/config` | Latest stored config (text) |
 | `POST /api/devices/{name}/backup` | Trigger a backup now |
+| `POST /api/devices/{name}/execute` | Run one command on the device (off by default, see below) |
 | `GET /api/credentials` | List credentials (no secrets returned) |
 | `POST /api/credentials` | Add a credential (name, username, password, enable) |
 | `DELETE /api/credentials/{name}` | Remove a credential |
@@ -168,6 +170,30 @@ All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
 
 The credential `GET` only reports whether a password/key/enable is set — it never
 returns secret material.
+
+### Running ad-hoc commands
+
+`POST /api/devices/{name}/execute` runs one non-interactive command on a device
+over an SSH exec channel and returns its output. It hands the API token a shell on
+every device, so it is **off by default**: enable it with `api_exec = true` in the
+config, `RUSTED_API_EXEC=true`, or `rusted serve --allow-exec`.
+
+```sh
+curl -H "Authorization: Bearer $RUSTED_API_TOKEN" \
+     -d '{"command": "/system resource print", "timeout": 20}' \
+     http://localhost:8080/api/devices/core-rtr/execute
+```
+
+```json
+{"device": "core-rtr", "status": "success", "output": "uptime: 3w2d…", "duration_ms": 412}
+```
+
+- `timeout` is 1–60 seconds (default 30) and covers connecting as well as running.
+- Output is stdout and stderr together, capped at 32 KiB. Past the cap the command
+  is stopped and `output` ends in `[output truncated]`.
+- A non-zero exit, timeout or truncation gives `"status": "failed"` with the reason
+  in `error`, alongside whatever output arrived first.
+- Nothing is recorded in backup history or committed to the backup repo.
 
 The LibreNMS plugin that consumes this API lives in
 [`librenms-module/`](librenms-module/README.md).

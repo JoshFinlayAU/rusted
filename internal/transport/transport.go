@@ -8,6 +8,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -35,6 +36,18 @@ type Session interface {
 	// Close terminates the session and releases resources.
 	Close() error
 }
+
+// Executor is an optional Session capability for running one ad-hoc command
+// with bounded output. SendCommand is built for backups, where the whole config
+// must come back and a non-zero exit after a good read is tolerated; Exec instead
+// stops when ctx ends or the output passes limit bytes, and reports every
+// failure alongside whatever output arrived first.
+type Executor interface {
+	Exec(ctx context.Context, cmd string, limit int) (string, error)
+}
+
+// ErrOutputLimit is returned by Exec when a command wrote more than the limit.
+var ErrOutputLimit = errors.New("output limit exceeded")
 
 // Transport opens sessions to devices over a particular protocol.
 type Transport interface {

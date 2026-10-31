@@ -11,6 +11,7 @@ import (
 
 func serveCmd() *cobra.Command {
 	var addr, token string
+	var allowExec bool
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the HTTP API used by the LibreNMS integration",
@@ -38,6 +39,8 @@ func serveCmd() *cobra.Command {
 				Git:    gs,
 				Engine: backup.New(st, gs),
 				Token:  token,
+				// The flag can only turn exec on; it can't override api_exec = true.
+				AllowExec: allowExec || cfg.APIExec,
 			}
 			fmt.Printf("rusted API listening on %s\n", addr)
 			return http.ListenAndServe(addr, srv.Handler())
@@ -45,5 +48,6 @@ func serveCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address (default from config or :8080)")
 	cmd.Flags().StringVar(&token, "token", "", "bearer token (default from config or RUSTED_API_TOKEN)")
+	cmd.Flags().BoolVar(&allowExec, "allow-exec", false, "enable POST /api/devices/{name}/execute (default from api_exec or RUSTED_API_EXEC)")
 	return cmd
 }

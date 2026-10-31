@@ -93,3 +93,32 @@ func TestRenderRoundTrip(t *testing.T) {
 		t.Fatalf("round trip mismatch:\n in: %+v\nout: %+v", in, out)
 	}
 }
+
+func TestAPIExecFromFileAndEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("api_exec = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || !cfg.APIExec {
+		t.Fatalf("api_exec = true not loaded: %+v, %v", cfg, err)
+	}
+	t.Setenv("RUSTED_API_EXEC", "false")
+	if cfg, _ = Load(path); cfg.APIExec {
+		t.Fatal("RUSTED_API_EXEC=false should override the file")
+	}
+
+	t.Setenv("RUSTED_API_EXEC", "")
+	if round, _ := Load(writeConfig(t, Config{APIExec: true}.Render())); !round.APIExec {
+		t.Fatal("Render dropped api_exec")
+	}
+}
+
+func writeConfig(t *testing.T, s string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

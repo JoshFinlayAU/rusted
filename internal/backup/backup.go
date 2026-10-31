@@ -37,6 +37,61 @@ type Result struct {
 	Bytes   int    `json:"bytes"`
 }
 
+// MaxExecuteOutput caps the output ExecuteDevice keeps from one command.
+const MaxExecuteOutput = 32 << 10
+
+// ExecuteResult is the bounded result of one ad-hoc command run on a device.
+type ExecuteResult struct {
+	Device     string `json:"device"`
+	Status     string `json:"status"` // "success", "failed"
+	Output     string `json:"output"`
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+// ExecuteDevice runs one non-interactive command on a device over an ssh-exec
+// channel, whatever transport its backups use. ctx bounds the whole call,
+// connect included. Nothing is recorded as a backup run or committed.
+func (e *Engine) ExecuteDevice(ctx context.Context, name, command string) (*ExecuteResult, error) {
+	dev, err := e.Store.GetDevice(name)
+	if err != nil {
+		return nil, err
+	}
+	started := time.Now()
+	res := &ExecuteResult{Device: dev.Name}
+	finish := func(out string, err error) (*ExecuteResult, error) {
+		res.Status, res.Output = "success", out
+		if err != nil {
+			res.Status, res.Error = "failed", err.Error()
+		}
+		res.DurationMS = time.Since(started).Milliseconds()
+		return res, nil
+	}
+
+	if dev.Credential == nil {
+		return finish("", fmt.Errorf("device has no credential"))
+	}
+	tr, err := transport.Get("ssh-exec")
+	if err != nil {
+		return finish("", err)
+	}
+	sess, err := tr.Dial(ctx, transport.Target{
+		Name: dev.Name, Host: dev.Host, Port: dev.Port,
+		Username: dev.Credential.Username, Password: dev.Credential.Password,
+		PrivateKey: []byte(dev.Credential.PrivateKey), Enable: dev.Credential.Enable,
+		Timeout: e.Timeout,
+	})
+	if err != nil {
+		return finish("", fmt.Errorf("connect: %w", err))
+	}
+	defer sess.Close()
+	ex, ok := sess.(transport.Executor)
+	if !ok {
+		return finish("", fmt.Errorf("transport %s cannot run ad-hoc commands", tr.Name()))
+	}
+	return finish(ex.Exec(ctx, command, MaxExecuteOutput))
+}
+
 // BackupDevice backs up one device by name and records the run.
 func (e *Engine) BackupDevice(ctx context.Context, name string) (*Result, error) {
 	dev, err := e.Store.GetDevice(name)
