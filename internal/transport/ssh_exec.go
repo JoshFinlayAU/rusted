@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -31,12 +32,13 @@ func (*SSHExec) Dial(ctx context.Context, t Target) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &execSession{client: client, raw: t.RawOutput}, nil
+	return &execSession{client: client, raw: t.RawOutput, debug: t.Debug}, nil
 }
 
 type execSession struct {
 	client *ssh.Client
-	raw    bool // Target.RawOutput: SendCommand returns stdout byte-exact
+	raw    bool      // Target.RawOutput: SendCommand returns stdout byte-exact
+	debug  io.Writer // Target.Debug trace (nil = silent)
 }
 
 // SendCommand runs cmd in a new exec channel and returns its stdout. No prompt
@@ -45,6 +47,7 @@ type execSession struct {
 // (some CLIs exit non-zero even on a good read); only an error with no output
 // is surfaced.
 func (s *execSession) SendCommand(cmd string) (string, error) {
+	tracef(s.debug, ">>> %s\n", cmd)
 	sess, err := s.client.NewSession()
 	if err != nil {
 		return "", err
@@ -59,6 +62,7 @@ func (s *execSession) SendCommand(cmd string) (string, error) {
 	if !s.raw {
 		text = cleanExec(text)
 	}
+	tracef(s.debug, "<<< %s\n", text)
 	if strings.TrimSpace(text) == "" {
 		// Nothing on stdout: whatever the device said on stderr is the only clue to
 		// why, so return it instead of an empty capture with no reason.

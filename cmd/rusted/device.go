@@ -23,7 +23,7 @@ func deviceCmd() *cobra.Command {
 
 func deviceAddCmd() *cobra.Command {
 	var host, driver, cred, group string
-	var port int
+	var port, cmdTimeout, idleTimeout int
 	var disabled bool
 	cmd := &cobra.Command{
 		Use:   "add NAME",
@@ -39,9 +39,20 @@ func deviceAddCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("credential %q: %w", cred, err)
 			}
+			if cmdTimeout < 0 || idleTimeout < 0 {
+				return fmt.Errorf("--cmd-timeout and --idle-timeout must not be negative")
+			}
 			d := &store.Device{
 				Name: args[0], Host: host, Port: port, Driver: driver,
 				CredentialID: c.ID, Group: group, Enabled: !disabled,
+				CmdTimeout: cmdTimeout, IdleTimeout: idleTimeout,
+			}
+			// Re-adding an existing device leaves timeouts not given here alone.
+			if !cmd.Flags().Changed("cmd-timeout") {
+				d.CmdTimeout = store.KeepTimeout
+			}
+			if !cmd.Flags().Changed("idle-timeout") {
+				d.IdleTimeout = store.KeepTimeout
 			}
 			if d.Host == "" {
 				d.Host = args[0]
@@ -59,6 +70,8 @@ func deviceAddCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&cred, "credential", "c", "", "credential name (required)")
 	cmd.Flags().StringVarP(&group, "group", "g", "", "sub-directory within the backup repo")
 	cmd.Flags().BoolVar(&disabled, "disabled", false, "add the device disabled")
+	cmd.Flags().IntVar(&cmdTimeout, "cmd-timeout", 0, "per-command timeout in seconds for interactive transports (0 = default 60)")
+	cmd.Flags().IntVar(&idleTimeout, "idle-timeout", 0, "quiet ms that end a command whose prompt isn't recognised (0 = default 700)")
 	cmd.MarkFlagRequired("credential")
 	return cmd
 }

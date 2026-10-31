@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -24,16 +23,19 @@ type SSH struct{}
 // Name implements Transport.
 func (*SSH) Name() string { return "ssh" }
 
-// promptRe matches a typical network-device shell prompt at the end of the
-// captured buffer: a hostname-like token followed by one of > # $ and optional
-// trailing whitespace. It covers bracketed prompts too, e.g. MikroTik's
-// "[admin@router] >". It is deliberately permissive; the idle-timeout in
-// drain() is the real safety net.
-var promptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ]+[#>$]\s*$`)
+// promptRe matches a typical network-device shell prompt: a hostname-like
+// token followed by one of > # $ and optional trailing whitespace. It covers
+// bracketed prompts (MikroTik's "[admin@router] >") and Linux-style ones with
+// a home directory ("root@host:~#"). It is deliberately permissive: drain only
+// tries it against the bare last line (trailingMatches), and the idle timeout
+// catches prompts it misses.
+var promptRe = regexp.MustCompile(`(?m)^[\w.@:()\[\]\-/ ~]+[#>$]\s*$`)
 
-// ansiRe matches ANSI/VT100 escape sequences. Some platforms (notably MikroTik
-// RouterOS) colourise their CLI even over a programmatic session.
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+// ansiRe matches ANSI/VT100 escape sequences, plus the OSC "set window title"
+// sequences shells emit. Some platforms (notably MikroTik RouterOS) colourise
+// their CLI even over a programmatic session, and bash wraps its prompt in
+// bracketed-paste toggles (\x1b[?2004h).
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 
 // dialClient opens an authenticated SSH client to the target with the widened
 // (legacy-friendly) KEX/cipher set network gear often needs. Shared by the
@@ -131,31 +133,26 @@ func (*SSH) Dial(ctx context.Context, t Target) (Session, error) {
 		return nil, fmt.Errorf("start shell: %w", err)
 	}
 
-	s := &sshSession{
-		client:      client,
-		sess:        sess,
-		stdin:       stdin,
-		out:         make(chan []byte, 64),
-		done:        make(chan error, 1),
-		idle:        700 * time.Millisecond,
-		readTimeout: 60 * time.Second,
-	}
+	s := &sshSession{client: client, sess: sess, stdin: stdin}
+	s.shell = newShell(t, "\n", func(p string) error {
+		_, err := io.WriteString(stdin, p)
+		return err
+	})
 	go s.reader(stdout)
 
 	// Consume the login banner / initial prompt so it does not contaminate the
 	// first command's output.
-	s.drain(10 * time.Second)
+	s.drain("", 10*time.Second)
 	return s, nil
 }
 
+// sshSession is an interactive PTY shell; the command loop (SendCommand,
+// prompt detection) lives in shell.
 type sshSession struct {
-	client      *ssh.Client
-	sess        *ssh.Session
-	stdin       io.WriteCloser
-	out         chan []byte
-	done        chan error
-	idle        time.Duration
-	readTimeout time.Duration
+	*shell
+	client *ssh.Client
+	sess   *ssh.Session
+	stdin  io.WriteCloser
 }
 
 func (s *sshSession) reader(r io.Reader) {
@@ -165,70 +162,34 @@ func (s *sshSession) reader(r io.Reader) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			s.out <- chunk
+			if !s.deliver(chunk) {
+				return
+			}
 		}
 		if err != nil {
-			s.done <- err
 			close(s.out)
 			return
 		}
 	}
 }
 
-// drain reads output until the device prompt reappears at the tail of the
-// buffer, the stream goes idle for s.idle, or maxWait elapses.
-func (s *sshSession) drain(maxWait time.Duration) string {
-	var buf bytes.Buffer
-	idle := time.NewTimer(s.idle)
-	defer idle.Stop()
-	hard := time.NewTimer(maxWait)
-	defer hard.Stop()
-	for {
-		select {
-		case chunk, ok := <-s.out:
-			if !ok {
-				return buf.String()
-			}
-			buf.Write(chunk)
-			if !idle.Stop() {
-				select {
-				case <-idle.C:
-				default:
-				}
-			}
-			idle.Reset(s.idle)
-			if promptRe.MatchString(tail(buf.Bytes(), 200)) {
-				return buf.String()
-			}
-		case <-idle.C:
-			return buf.String()
-		case <-hard.C:
-			return buf.String()
-		}
-	}
-}
-
-// SendCommand implements Session.
-func (s *sshSession) SendCommand(cmd string) (string, error) {
-	if _, err := io.WriteString(s.stdin, cmd+"\n"); err != nil {
-		return "", err
-	}
-	raw := s.drain(s.readTimeout)
-	return cleanOutput(cmd, raw), nil
-}
-
 // Close implements Session.
 func (s *sshSession) Close() error {
 	_, _ = io.WriteString(s.stdin, "exit\n")
+	s.stop()
 	s.stdin.Close()
 	s.sess.Close()
 	return s.client.Close()
 }
 
 // cleanOutput removes the echoed command (first line) and a trailing prompt
-// line from a captured response, and normalises CRLF to LF.
+// line from a captured response, renders backspaces, and normalises CRLF to
+// LF.
 func cleanOutput(cmd, raw string) string {
 	raw = ansiRe.ReplaceAllString(raw, "")
+	if strings.IndexByte(raw, '\b') >= 0 {
+		raw = applyBackspaces(raw)
+	}
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	raw = strings.ReplaceAll(raw, "\r", "\n")
 	lines := strings.Split(raw, "\n")
@@ -246,6 +207,28 @@ func cleanOutput(cmd, raw string) string {
 		break
 	}
 	return strings.Join(lines, "\n")
+}
+
+// applyBackspaces renders \b the way a terminal would, deleting the character
+// before it on the same line. Pager prompts are wiped this way (IOS prints
+// "\b\b\b   \b\b\b"), and the leftovers must not reach the backup.
+func applyBackspaces(s string) string {
+	out := make([]byte, 0, len(s))
+	lineStart := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '\b':
+			if len(out) > lineStart {
+				out = out[:len(out)-1]
+			}
+		case '\n', '\r':
+			out = append(out, c)
+			lineStart = len(out)
+		default:
+			out = append(out, c)
+		}
+	}
+	return string(out)
 }
 
 func tail(b []byte, n int) string {

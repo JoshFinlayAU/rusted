@@ -37,7 +37,9 @@ type Device struct {
 	Host         string
 	Port         int
 	Driver       string
-	Transport    string // transport name (e.g. "routeros-api"); "" = engine default (ssh)
+	Transport    string // transport name (e.g. "routeros-api", "telnet"); "" = engine default (ssh)
+	CmdTimeout   int    // per-command hard timeout in seconds; 0 = transport default (60s)
+	IdleTimeout  int    // quiet period in ms that ends an unrecognised prompt; 0 = transport default (700ms)
 	CredentialID int64
 	Group        string // sub-directory within the backup repo
 	Enabled      bool
@@ -99,6 +101,8 @@ CREATE TABLE IF NOT EXISTS devices (
     port          INTEGER NOT NULL DEFAULT 22,
     driver        TEXT NOT NULL DEFAULT 'generic',
     transport     TEXT NOT NULL DEFAULT '',
+    cmd_timeout   INTEGER NOT NULL DEFAULT 0,
+    idle_timeout  INTEGER NOT NULL DEFAULT 0,
     credential_id INTEGER NOT NULL REFERENCES credentials(id),
     "group"       TEXT NOT NULL DEFAULT '',
     enabled       INTEGER NOT NULL DEFAULT 1
@@ -121,6 +125,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_device ON backup_runs(device_id, started_at 
 	// Additive migrations for databases created before a column existed
 	// (CREATE TABLE IF NOT EXISTS never adds columns to an existing table).
 	s.addColumnIfMissing("devices", "transport", "TEXT NOT NULL DEFAULT ''")
+	s.addColumnIfMissing("devices", "cmd_timeout", "INTEGER NOT NULL DEFAULT 0")
+	s.addColumnIfMissing("devices", "idle_timeout", "INTEGER NOT NULL DEFAULT 0")
 	return nil
 }
 
@@ -238,6 +244,12 @@ func (s *Store) DeleteCredential(name string) error {
 
 // --- Devices ---
 
+// KeepTimeout, as a Device's CmdTimeout or IdleTimeout passed to CreateDevice,
+// leaves that timeout as already stored (0, the default, for a new device).
+// Callers that re-register a device without saying anything about its
+// timeouts use it so they don't reset values set elsewhere.
+const KeepTimeout = -1
+
 // CreateDevice inserts a new device. CredentialID must reference an existing
 // credential. The name and group become a path in the backup repository, so
 // they are validated first (errors wrap ErrInvalid).
@@ -253,25 +265,29 @@ func (s *Store) CreateDevice(d *Device) (int64, error) {
 	}
 	// Upsert on the unique name so a re-register (the caller syncs state before every
 	// backup) updates host/driver/transport/credential/enabled instead of failing.
+	// A negative timeout (KeepTimeout) inserts as 0 and leaves an existing value.
 	res, err := s.db.Exec(
-		`INSERT INTO devices (name, host, port, driver, transport, credential_id, "group", enabled)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO devices (name, host, port, driver, transport, cmd_timeout, idle_timeout, credential_id, "group", enabled)
+		 VALUES (?1,?2,?3,?4,?5,MAX(?6,0),MAX(?7,0),?8,?9,?10)
 		 ON CONFLICT(name) DO UPDATE SET
 		   host=excluded.host, port=excluded.port, driver=excluded.driver,
-		   transport=excluded.transport, credential_id=excluded.credential_id,
+		   transport=excluded.transport,
+		   cmd_timeout=CASE WHEN ?6 < 0 THEN devices.cmd_timeout ELSE excluded.cmd_timeout END,
+		   idle_timeout=CASE WHEN ?7 < 0 THEN devices.idle_timeout ELSE excluded.idle_timeout END,
+		   credential_id=excluded.credential_id,
 		   "group"=excluded."group", enabled=excluded.enabled`,
-		d.Name, d.Host, d.Port, d.Driver, d.Transport, d.CredentialID, d.Group, d.Enabled)
+		d.Name, d.Host, d.Port, d.Driver, d.Transport, d.CmdTimeout, d.IdleTimeout, d.CredentialID, d.Group, d.Enabled)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-const deviceCols = `d.id, d.name, d.host, d.port, d.driver, d.transport, d.credential_id, d."group", d.enabled`
+const deviceCols = `d.id, d.name, d.host, d.port, d.driver, d.transport, d.cmd_timeout, d.idle_timeout, d.credential_id, d."group", d.enabled`
 
 func scanDevice(row interface{ Scan(...any) error }) (*Device, error) {
 	var d Device
-	if err := row.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CredentialID, &d.Group, &d.Enabled); err != nil {
+	if err := row.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CmdTimeout, &d.IdleTimeout, &d.CredentialID, &d.Group, &d.Enabled); err != nil {
 		return nil, err
 	}
 	return &d, nil
@@ -339,7 +355,7 @@ func (s *Store) ListDevicesWithStatus() ([]*Device, error) {
 		var d Device
 		var cred, status, msg sql.NullString
 		var last sql.NullTime
-		if err := rows.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CredentialID, &d.Group, &d.Enabled,
+		if err := rows.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CmdTimeout, &d.IdleTimeout, &d.CredentialID, &d.Group, &d.Enabled,
 			&cred, &last, &status, &msg); err != nil {
 			return nil, err
 		}
@@ -370,8 +386,11 @@ func (s *Store) UpdateDevice(d *Device, hook Hook) error {
 		return err
 	}
 	return s.inTx(hook, func(tx *sql.Tx) (sql.Result, error) {
-		return tx.Exec(`UPDATE devices SET host = ?, port = ?, driver = ?, transport = ?, credential_id = ?, "group" = ?, enabled = ?
-			WHERE id = ?`, d.Host, d.Port, d.Driver, d.Transport, d.CredentialID, d.Group, d.Enabled, d.ID)
+		// As in CreateDevice, a negative (KeepTimeout) timeout leaves the stored one.
+		return tx.Exec(`UPDATE devices SET host = ?, port = ?, driver = ?, transport = ?, credential_id = ?, "group" = ?, enabled = ?,
+			cmd_timeout = CASE WHEN ?8 < 0 THEN cmd_timeout ELSE ?8 END,
+			idle_timeout = CASE WHEN ?9 < 0 THEN idle_timeout ELSE ?9 END
+			WHERE id = ?10`, d.Host, d.Port, d.Driver, d.Transport, d.CredentialID, d.Group, d.Enabled, d.CmdTimeout, d.IdleTimeout, d.ID)
 	})
 }
 
