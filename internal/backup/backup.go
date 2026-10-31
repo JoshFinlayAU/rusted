@@ -23,6 +23,7 @@ type Engine struct {
 	Transport string        // transport name, default "ssh"
 	Timeout   time.Duration // per-device connect timeout
 	Log       io.Writer     // verbose progress output (nil = silent)
+	Debug     io.Writer     // device I/O trace for backups (nil = silent; set by --debug)
 }
 
 // New builds an Engine with sensible defaults.
@@ -226,17 +227,23 @@ func (e *Engine) capture(ctx context.Context, dev *store.Device, drv driver.Driv
 	e.logf("  using transport %q, driver %q\n", transportName, drv.Name)
 
 	tgt := transport.Target{
-		Name:       dev.Name,
-		Host:       dev.Host,
-		Port:       dev.Port,
-		Username:   dev.Credential.Username,
-		Password:   dev.Credential.Password,
-		PrivateKey: []byte(dev.Credential.PrivateKey),
-		Enable:     dev.Credential.Enable,
-		Timeout:    e.Timeout,
-		RawOutput:  drv.BinarySafe,
+		Name:        dev.Name,
+		Host:        dev.Host,
+		Port:        dev.Port,
+		Username:    dev.Credential.Username,
+		Password:    dev.Credential.Password,
+		PrivateKey:  []byte(dev.Credential.PrivateKey),
+		Enable:      dev.Credential.Enable,
+		Timeout:     e.Timeout,
+		RawOutput:   drv.BinarySafe,
+		CmdTimeout:  time.Duration(dev.CmdTimeout) * time.Second,
+		IdleTimeout: time.Duration(dev.IdleTimeout) * time.Millisecond,
+		Debug:       e.Debug,
 	}
 
+	if e.Debug != nil {
+		fmt.Fprintf(e.Debug, "=== %s (%s:%d, transport %s, driver %s) ===\n", dev.Name, dev.Host, dev.Port, transportName, drv.Name)
+	}
 	dialCtx, cancel := context.WithTimeout(ctx, e.Timeout)
 	defer cancel()
 	sess, err := tr.Dial(dialCtx, tgt)

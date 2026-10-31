@@ -159,18 +159,29 @@ func (s *Server) deleteCredential(w http.ResponseWriter, r *http.Request) {
 }
 
 type deviceDTO struct {
-	Name       string `json:"name"`
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	Driver     string `json:"driver"`
-	Transport  string `json:"transport"`
-	Credential string `json:"credential"`
-	Group      string `json:"group"`
-	Enabled    bool   `json:"enabled"`
+	Name        string `json:"name"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Driver      string `json:"driver"`
+	Transport   string `json:"transport"`
+	Credential  string `json:"credential"`
+	Group       string `json:"group"`
+	Enabled     bool   `json:"enabled"`
+	CmdTimeout  int    `json:"cmd_timeout"`  // seconds; 0 = default
+	IdleTimeout int    `json:"idle_timeout"` // milliseconds; 0 = default
 	// The most recent backup run: null / "" when the device was never backed up.
 	LastBackup  *time.Time `json:"last_backup"`
 	LastStatus  string     `json:"last_status"` // "success", "unchanged", "failed"
 	LastMessage string     `json:"last_message"`
+}
+
+func newDeviceDTO(d *store.Device) deviceDTO {
+	return deviceDTO{
+		Name: d.Name, Host: d.Host, Port: d.Port, Driver: d.Driver, Transport: d.Transport,
+		Credential: d.CredentialName, Group: d.Group, Enabled: d.Enabled,
+		CmdTimeout: d.CmdTimeout, IdleTimeout: d.IdleTimeout,
+		LastBackup: d.LastBackup, LastStatus: d.LastStatus, LastMessage: d.LastMessage,
+	}
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
@@ -181,8 +192,7 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]deviceDTO, 0, len(devs))
 	for _, d := range devs {
-		out = append(out, deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, d.CredentialName, d.Group, d.Enabled,
-			d.LastBackup, d.LastStatus, d.LastMessage})
+		out = append(out, newDeviceDTO(d))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -193,7 +203,7 @@ func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	dto := deviceDTO{Name: d.Name, Host: d.Host, Port: d.Port, Driver: d.Driver, Transport: d.Transport, Group: d.Group, Enabled: d.Enabled}
+	dto := newDeviceDTO(d)
 	if d.Credential != nil {
 		dto.Credential = d.Credential.Name
 	}
@@ -218,6 +228,10 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		Credential string `json:"credential"`
 		Group      string `json:"group"`
 		Enabled    *bool  `json:"enabled"`
+		// Omitted timeouts keep the stored values: the LibreNMS plugin
+		// re-POSTs a device on every edit and must not reset them.
+		CmdTimeout  *int `json:"cmd_timeout"`  // seconds; 0 = default
+		IdleTimeout *int `json:"idle_timeout"` // milliseconds; 0 = default
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -226,6 +240,17 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 	if in.Name == "" || in.Host == "" || in.Credential == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name, host and credential are required"})
 		return
+	}
+	if (in.CmdTimeout != nil && *in.CmdTimeout < 0) || (in.IdleTimeout != nil && *in.IdleTimeout < 0) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cmd_timeout and idle_timeout must not be negative"})
+		return
+	}
+	cmdTimeout, idleTimeout := store.KeepTimeout, store.KeepTimeout
+	if in.CmdTimeout != nil {
+		cmdTimeout = *in.CmdTimeout
+	}
+	if in.IdleTimeout != nil {
+		idleTimeout = *in.IdleTimeout
 	}
 	cred, err := s.Store.GetCredential(in.Credential)
 	if err != nil {
@@ -239,6 +264,7 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 	d := &store.Device{
 		Name: in.Name, Host: in.Host, Port: in.Port, Driver: in.Driver, Transport: in.Transport,
 		CredentialID: cred.ID, Group: in.Group, Enabled: enabled,
+		CmdTimeout: cmdTimeout, IdleTimeout: idleTimeout,
 	}
 	// Re-registering an existing device under another group must take its
 	// config file (and history) along, so that update moves it in the repo.

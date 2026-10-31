@@ -11,8 +11,8 @@ bundled **LibreNMS** integration.
 
 ## Features
 
-- **SSH transport**, with a documented, pluggable transport interface
-  (telnet/NETCONF/REST can be added without touching the core) — see
+- **SSH and telnet transports**, with a documented, pluggable transport
+  interface (NETCONF/REST can be added without touching the core) — see
   [docs/transport-modules.md](docs/transport-modules.md).
 - **Per-platform drivers** that know how to disable paging and dump config —
   see [docs/drivers.md](docs/drivers.md).
@@ -331,7 +331,7 @@ Run it once by hand to verify: `sudo systemctl start rusted-backup.service`.
 - `known_hosts` host-key pinning (SSH currently accepts any host key).
 - Concurrent `--all` backups with a worker pool.
 - Webhook/Slack notifications on backup failure.
-- Telnet and NETCONF transports.
+- NETCONF transport.
 
 ## Project layout
 
@@ -341,7 +341,7 @@ cmd/rusted/         CLI (cobra)
 internal/config/    config file + env + flag resolution
 internal/store/     SQLite: credentials, devices, run history
 internal/secret/    AES-GCM encryption-at-rest
-internal/transport/ transport interface + SSH implementation
+internal/transport/ transport interface + SSH and telnet implementations
 internal/driver/    per-platform drivers
 internal/normalize/ dynamic-string (timestamp/date/uptime) masking
 internal/gitstore/  git-backed backup storage
