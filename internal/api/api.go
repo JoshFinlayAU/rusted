@@ -13,7 +13,9 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/athenanetworks/rusted/internal/gitstore"
 	"github.com/athenanetworks/rusted/internal/provision"
 	"github.com/athenanetworks/rusted/internal/store"
+	"github.com/athenanetworks/rusted/internal/transport"
 )
 
 // Server holds dependencies for the HTTP API.
@@ -41,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /api/drivers", s.listDrivers)
+	mux.HandleFunc("GET /api/transports", s.listTransports)
 	mux.HandleFunc("GET /api/credentials", s.listCredentials)
 	mux.HandleFunc("POST /api/credentials", s.createCredential)
 	mux.HandleFunc("DELETE /api/credentials/{name}", s.deleteCredential)
@@ -84,6 +88,11 @@ func (s *Server) listDrivers(w http.ResponseWriter, r *http.Request) {
 		out = append(out, drvDTO{d.Name, d.Description})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// listTransports returns the registered transport names, sorted.
+func (s *Server) listTransports(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, transport.Names())
 }
 
 // credentialDTO never exposes secret material — only whether it is set.
@@ -158,17 +167,22 @@ type deviceDTO struct {
 	Credential string `json:"credential"`
 	Group      string `json:"group"`
 	Enabled    bool   `json:"enabled"`
+	// The most recent backup run: null / "" when the device was never backed up.
+	LastBackup  *time.Time `json:"last_backup"`
+	LastStatus  string     `json:"last_status"` // "success", "unchanged", "failed"
+	LastMessage string     `json:"last_message"`
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
-	devs, err := s.Store.ListDevices()
+	devs, err := s.Store.ListDevicesWithStatus()
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	out := make([]deviceDTO, 0, len(devs))
 	for _, d := range devs {
-		out = append(out, deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, "", d.Group, d.Enabled})
+		out = append(out, deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, d.CredentialName, d.Group, d.Enabled,
+			d.LastBackup, d.LastStatus, d.LastMessage})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -179,9 +193,17 @@ func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	dto := deviceDTO{d.Name, d.Host, d.Port, d.Driver, d.Transport, "", d.Group, d.Enabled}
+	dto := deviceDTO{Name: d.Name, Host: d.Host, Port: d.Port, Driver: d.Driver, Transport: d.Transport, Group: d.Group, Enabled: d.Enabled}
 	if d.Credential != nil {
 		dto.Credential = d.Credential.Name
+	}
+	runs, err := s.Store.History(d.Name, 1)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if len(runs) > 0 {
+		dto.LastBackup, dto.LastStatus, dto.LastMessage = &runs[0].StartedAt, runs[0].Status, runs[0].Message
 	}
 	writeJSON(w, http.StatusOK, dto)
 }
@@ -218,11 +240,34 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		Name: in.Name, Host: in.Host, Port: in.Port, Driver: in.Driver, Transport: in.Transport,
 		CredentialID: cred.ID, Group: in.Group, Enabled: enabled,
 	}
-	if _, err := s.Store.CreateDevice(d); err != nil {
+	// Re-registering an existing device under another group must take its
+	// config file (and history) along, so that update moves it in the repo.
+	if old, err := s.Store.GetDevice(in.Name); err == nil && old.Group != in.Group {
+		d.ID = old.ID
+		if d.Port == 0 {
+			d.Port = 22
+		}
+		if err := s.Store.UpdateDevice(d, s.moveHook(old, d)); err != nil {
+			writeErr(w, err)
+			return
+		}
+	} else if _, err := s.Store.CreateDevice(d); err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "created", "name": in.Name})
+}
+
+// moveHook moves old's config file to where d's lives. A row stored before
+// names were validated has no trustworthy path, so its file is left alone.
+func (s *Server) moveHook(old, d *store.Device) store.Hook {
+	if store.ValidateDeviceName(old.Name) != nil || store.ValidateGroup(old.Group) != nil {
+		return nil
+	}
+	from, to := old.ConfigPath(), d.ConfigPath()
+	return func() (func() error, error) {
+		return s.Git.MoveFile(from, to, "move "+from+" to "+to)
+	}
 }
 
 // provisionMikrotikSSHKey installs a generated SSH public key on a RouterOS device over
@@ -252,12 +297,32 @@ func (s *Server) provisionMikrotikSSHKey(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, res)
 }
 
+// deleteDevice removes a device, its run history and its config file in the
+// backup repository (the removal is a commit, so earlier versions stay in git
+// history). Repository and database change together or not at all.
 func (s *Server) deleteDevice(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.DeleteDevice(r.PathValue("name")); err != nil {
+	d, err := s.Store.GetDevice(r.PathValue("name"))
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	resp := map[string]string{"status": "deleted"}
+	var hook store.Hook
+	if pathErr := errors.Join(store.ValidateDeviceName(d.Name), store.ValidateGroup(d.Group)); pathErr != nil {
+		// A row stored before names were validated: don't derive a repository
+		// path from it, just drop the row.
+		resp["warning"] = "config file left in the backup repository: " + pathErr.Error()
+	} else {
+		rel := d.ConfigPath()
+		hook = func() (func() error, error) {
+			return s.Git.RemoveFile(rel, "remove "+d.Name+" (device deleted)")
+		}
+	}
+	if err := s.Store.DeleteDeviceTx(d.Name, hook); err != nil {
+		writeErr(w, fmt.Errorf("device not deleted: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) deviceHistory(w http.ResponseWriter, r *http.Request) {
@@ -309,34 +374,37 @@ func (s *Server) deviceConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // deviceVersions lists the git history of a device's config file (one entry per
-// change), newest first, so the UI can pick versions to view or diff.
+// change), newest first, so the UI can pick versions to view or diff. History
+// follows renames. ?limit=N (1-1000, default 100) caps the number of entries.
 func (s *Server) deviceVersions(w http.ResponseWriter, r *http.Request) {
 	_, rel, ok := s.deviceRel(w, r)
 	if !ok {
 		return
 	}
-	lines, err := s.Git.Log(rel, 100)
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 1000"})
+			return
+		}
+		limit = n
+	}
+	entries, err := s.Git.LogDetailed(rel, limit)
 	if err != nil {
 		writeJSON(w, http.StatusOK, []any{}) // no history yet
 		return
 	}
 	type version struct {
-		Commit  string `json:"commit"`
-		Date    string `json:"date"`
-		Subject string `json:"subject"`
+		Commit     string `json:"commit"`
+		Date       string `json:"date"`        // YYYY-MM-DD
+		CapturedAt string `json:"captured_at"` // RFC 3339 with offset
+		Author     string `json:"author"`
+		Subject    string `json:"subject"`
 	}
-	out := make([]version, 0, len(lines))
-	for _, ln := range lines {
-		// "<hash> <YYYY-MM-DD> <subject...>"
-		parts := strings.SplitN(ln, " ", 3)
-		if len(parts) < 2 {
-			continue
-		}
-		v := version{Commit: parts[0], Date: parts[1]}
-		if len(parts) == 3 {
-			v.Subject = parts[2]
-		}
-		out = append(out, v)
+	out := make([]version, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, version{Commit: e.Commit, Date: e.Date[:min(10, len(e.Date))], CapturedAt: e.Date, Author: e.Author, Subject: e.Subject})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -372,11 +440,7 @@ func (s *Server) deviceRel(w http.ResponseWriter, r *http.Request) (*store.Devic
 		writeErr(w, err)
 		return nil, "", false
 	}
-	rel := d.Name + ".cfg"
-	if d.Group != "" {
-		rel = d.Group + "/" + rel
-	}
-	return d, rel, true
+	return d, d.ConfigPath(), true
 }
 
 // validCommit allows only hex commit hashes (what our own /versions hands out), so a
@@ -456,6 +520,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if errors.Is(err, store.ErrInvalid) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

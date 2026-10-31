@@ -5,6 +5,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -21,11 +22,19 @@ type Engine struct {
 	Git       *gitstore.Store
 	Transport string        // transport name, default "ssh"
 	Timeout   time.Duration // per-device connect timeout
+	Log       io.Writer     // verbose progress output (nil = silent)
 }
 
 // New builds an Engine with sensible defaults.
 func New(st *store.Store, gs *gitstore.Store) *Engine {
 	return &Engine{Store: st, Git: gs, Transport: "ssh", Timeout: 30 * time.Second}
+}
+
+// logf writes a progress line to Log, if set.
+func (e *Engine) logf(format string, args ...any) {
+	if e.Log != nil {
+		fmt.Fprintf(e.Log, format, args...)
+	}
 }
 
 // Result is the outcome of backing up a single device.
@@ -125,6 +134,7 @@ func (e *Engine) BackupAll(ctx context.Context) ([]*Result, error) {
 func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 	started := time.Now()
 	res := &Result{Device: dev.Name}
+	e.logf("=== %s [%s:%s] ===\n", dev.Name, dev.Host, dev.Driver)
 
 	finish := func(status, msg, commit string, n int) *Result {
 		res.Status, res.Message, res.Commit, res.Bytes = status, msg, commit, n
@@ -164,6 +174,7 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 	if err != nil {
 		return finish("failed", err.Error(), "", 0)
 	}
+	e.logf("  using transport %q, driver %q\n", transportName, drv.Name)
 
 	tgt := transport.Target{
 		Name:       dev.Name,
@@ -180,20 +191,25 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 	defer cancel()
 	sess, err := tr.Dial(dialCtx, tgt)
 	if err != nil {
+		e.logf("  connect FAILED: %v\n", err)
 		return finish("failed", "connect: "+err.Error(), "", 0)
 	}
 	defer sess.Close()
+	e.logf("  connected, running %d init command(s)\n", len(drv.Init))
 
 	for _, c := range drv.Init {
 		if _, err := sess.SendCommand(c); err != nil {
+			e.logf("  init %q FAILED: %v\n", c, err)
 			return finish("failed", fmt.Sprintf("init command %q: %v", c, err), "", 0)
 		}
 	}
+	e.logf("  collecting config (%d command(s))\n", len(drv.Config))
 
 	var buf strings.Builder
 	for _, c := range drv.Config {
 		out, err := sess.SendCommand(c)
 		if err != nil {
+			e.logf("  config %q FAILED: %v\n", c, err)
 			return finish("failed", fmt.Sprintf("config command %q: %v", c, err), "", 0)
 		}
 		buf.WriteString(out)
@@ -204,8 +220,10 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 
 	clean := drv.Clean(buf.String())
 	if strings.TrimSpace(clean) == "" {
+		e.logf("  captured empty configuration\n")
 		return finish("failed", "captured empty configuration", "", 0)
 	}
+	e.logf("  captured %d bytes, saving to git\n", len(clean))
 
 	relPath := dev.Name + ".cfg"
 	if dev.Group != "" {
