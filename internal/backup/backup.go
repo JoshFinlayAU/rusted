@@ -150,75 +150,16 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 		return res
 	}
 
-	if dev.Credential == nil {
-		return finish("failed", "device has no credential", "", 0)
-	}
-
 	drv, known := driver.Get(dev.Driver)
 	if !known {
 		// Not fatal: generic driver is used, but note it.
 		res.Message = fmt.Sprintf("unknown driver %q, used generic", dev.Driver)
 	}
-
-	// Transport precedence: a device can pin its own ("routeros-api"), else the
-	// driver's preferred transport (MikroTik pins "ssh-exec"), else the engine
-	// default (interactive ssh).
-	transportName := e.Transport
-	if drv.Transport != "" {
-		transportName = drv.Transport
-	}
-	if dev.Transport != "" {
-		transportName = dev.Transport
-	}
-	tr, err := transport.Get(transportName)
+	raw, err := e.capture(ctx, dev, drv)
 	if err != nil {
 		return finish("failed", err.Error(), "", 0)
 	}
-	e.logf("  using transport %q, driver %q\n", transportName, drv.Name)
-
-	tgt := transport.Target{
-		Name:       dev.Name,
-		Host:       dev.Host,
-		Port:       dev.Port,
-		Username:   dev.Credential.Username,
-		Password:   dev.Credential.Password,
-		PrivateKey: []byte(dev.Credential.PrivateKey),
-		Enable:     dev.Credential.Enable,
-		Timeout:    e.Timeout,
-	}
-
-	dialCtx, cancel := context.WithTimeout(ctx, e.Timeout)
-	defer cancel()
-	sess, err := tr.Dial(dialCtx, tgt)
-	if err != nil {
-		e.logf("  connect FAILED: %v\n", err)
-		return finish("failed", "connect: "+err.Error(), "", 0)
-	}
-	defer sess.Close()
-	e.logf("  connected, running %d init command(s)\n", len(drv.Init))
-
-	for _, c := range drv.Init {
-		if _, err := sess.SendCommand(c); err != nil {
-			e.logf("  init %q FAILED: %v\n", c, err)
-			return finish("failed", fmt.Sprintf("init command %q: %v", c, err), "", 0)
-		}
-	}
-	e.logf("  collecting config (%d command(s))\n", len(drv.Config))
-
-	var buf strings.Builder
-	for _, c := range drv.Config {
-		out, err := sess.SendCommand(c)
-		if err != nil {
-			e.logf("  config %q FAILED: %v\n", c, err)
-			return finish("failed", fmt.Sprintf("config command %q: %v", c, err), "", 0)
-		}
-		buf.WriteString(out)
-		if !strings.HasSuffix(out, "\n") {
-			buf.WriteByte('\n')
-		}
-	}
-
-	clean := drv.Clean(buf.String())
+	clean := drv.Clean(raw)
 	if strings.TrimSpace(clean) == "" {
 		e.logf("  captured empty configuration\n")
 		return finish("failed", "captured empty configuration", "", 0)
@@ -238,4 +179,99 @@ func (e *Engine) backup(ctx context.Context, dev *store.Device) *Result {
 		return finish("success", "configuration updated", sr.Commit, sr.Bytes)
 	}
 	return finish("unchanged", "no configuration change", sr.Commit, sr.Bytes)
+}
+
+// CaptureRaw fetches a device's configuration exactly as the device sent it
+// (after the driver's PostProcess formatting, but with no Strip, StripBlocks
+// or Mask rules and no dynamic-string masking), for writing and debugging
+// strip rules. It may contain secrets the normal backup masks, so nothing is
+// committed or recorded as a backup run.
+func (e *Engine) CaptureRaw(ctx context.Context, name string) (string, error) {
+	dev, err := e.Store.GetDevice(name)
+	if err != nil {
+		return "", err
+	}
+	drv, _ := driver.Get(dev.Driver)
+	raw, err := e.capture(ctx, dev, drv)
+	if err != nil {
+		return "", err
+	}
+	return drv.CleanRaw(raw), nil
+}
+
+// capture connects to dev and returns the combined, post-processed output of
+// drv's Config commands. Errors are worded for a backup run's message.
+func (e *Engine) capture(ctx context.Context, dev *store.Device, drv driver.Driver) (string, error) {
+	if dev.Credential == nil {
+		return "", fmt.Errorf("device has no credential")
+	}
+	if drv.Prepare != nil {
+		drv = drv.Prepare(drv)
+	}
+
+	// Transport precedence: a device can pin its own ("routeros-api"), else the
+	// driver's preferred transport (MikroTik pins "ssh-exec"), else the engine
+	// default (interactive ssh).
+	transportName := e.Transport
+	if drv.Transport != "" {
+		transportName = drv.Transport
+	}
+	if dev.Transport != "" {
+		transportName = dev.Transport
+	}
+	tr, err := transport.Get(transportName)
+	if err != nil {
+		return "", err
+	}
+	e.logf("  using transport %q, driver %q\n", transportName, drv.Name)
+
+	tgt := transport.Target{
+		Name:       dev.Name,
+		Host:       dev.Host,
+		Port:       dev.Port,
+		Username:   dev.Credential.Username,
+		Password:   dev.Credential.Password,
+		PrivateKey: []byte(dev.Credential.PrivateKey),
+		Enable:     dev.Credential.Enable,
+		Timeout:    e.Timeout,
+		RawOutput:  drv.BinarySafe,
+	}
+
+	dialCtx, cancel := context.WithTimeout(ctx, e.Timeout)
+	defer cancel()
+	sess, err := tr.Dial(dialCtx, tgt)
+	if err != nil {
+		e.logf("  connect FAILED: %v\n", err)
+		return "", fmt.Errorf("connect: %w", err)
+	}
+	defer sess.Close()
+	e.logf("  connected, running %d init command(s)\n", len(drv.Init))
+
+	for _, c := range drv.Init {
+		if _, err := sess.SendCommand(c); err != nil {
+			e.logf("  init %q FAILED: %v\n", c, err)
+			return "", fmt.Errorf("init command %q: %w", c, err)
+		}
+	}
+	e.logf("  collecting config (%d command(s))\n", len(drv.Config))
+
+	var buf strings.Builder
+	for _, c := range drv.Config {
+		out, err := sess.SendCommand(c)
+		if err != nil {
+			e.logf("  config %q FAILED: %v\n", c, err)
+			return "", fmt.Errorf("config command %q: %w", c, err)
+		}
+		buf.WriteString(out)
+		// Framing newline between commands, except for BinarySafe drivers
+		// whose bytes must reach PostProcess untouched.
+		if !drv.BinarySafe && !strings.HasSuffix(out, "\n") {
+			buf.WriteByte('\n')
+		}
+	}
+
+	if drv.PostProcess == nil {
+		return buf.String(), nil
+	}
+	return drv.PostProcess(buf.String())
 }

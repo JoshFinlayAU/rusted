@@ -20,13 +20,16 @@ func backupCmd() *cobra.Command {
 }
 
 func backupRunCmd() *cobra.Command {
-	var all, verbose bool
+	var all, verbose, raw bool
 	cmd := &cobra.Command{
 		Use:   "run [NAME]",
 		Short: "Back up a device (or --all enabled devices)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !all && len(args) != 1 {
 				return fmt.Errorf("specify a device NAME or use --all")
+			}
+			if raw && all {
+				return fmt.Errorf("--raw takes a single device NAME, not --all")
 			}
 			st, err := openStore()
 			if err != nil {
@@ -42,6 +45,15 @@ func backupRunCmd() *cobra.Command {
 				eng.Log = os.Stderr
 			}
 			ctx := context.Background()
+
+			if raw {
+				out, err := eng.CaptureRaw(ctx, args[0])
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprint(os.Stdout, out)
+				return err
+			}
 
 			var results []*backup.Result
 			if all {
@@ -88,6 +100,7 @@ func backupRunCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "back up all enabled devices")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print per-device progress to stderr")
+	cmd.Flags().BoolVar(&raw, "raw", false, "print the unmasked capture to stdout instead of backing up (nothing is committed or recorded; output may contain secrets)")
 	return cmd
 }
 
