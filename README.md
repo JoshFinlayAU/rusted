@@ -123,13 +123,41 @@ git -C "$(rusted config show | awk '/backups:/{print $2}')" log --oneline
 | `rusted config init/show` | Create or display the config file |
 | `rusted cred add/list/remove` | Manage login credentials |
 | `rusted device add/list/remove/enable/disable` | Manage device inventory |
+| `rusted device update NAME [--host/--port/--driver/--transport/--credential/--group]` | Change a device's settings |
+| `rusted device rename OLD NEW` | Rename a device, keeping its history |
 | `rusted driver list` | List platform drivers |
-| `rusted backup run [NAME] [--all]` | Run backups |
+| `rusted backup run [NAME] [--all] [-v]` | Run backups (`-v` prints per-device progress to stderr) |
 | `rusted backup history NAME` | Show a device's backup history |
 | `rusted serve` | Run the HTTP API for LibreNMS |
 
 Global flags: `--config`, `--db`, `--backups` (each overrides the config file
 and the corresponding `RUSTED_*` environment variable).
+
+### Device names, groups and the backup repository
+
+A device's config is stored at `[GROUP/]NAME.cfg` in the backup repository, so
+names and groups are checked whenever a device is added, updated or renamed
+(CLI and API alike). A name is a single path component: not empty, no `/` or
+`\`, not `.` or `..`, not starting with `-`, no control characters. A group may
+nest with `/` (`site/core`) but must be relative, with no empty, `.`, `..` or
+`.git` components and no `\`. Devices stored by older versions are not
+rewritten; they are only checked when next changed.
+
+The repository follows the inventory:
+
+- `device update --group` moves the stored config (a `git mv` commit), so its
+  history comes along. Flags you leave out keep their value; `--group ""`,
+  `--transport ""` and `--driver ""` reset to the root / default.
+- `device rename OLD NEW` keeps the device's run history and moves its config,
+  and the version list, config view and diffs follow the file across the rename.
+  The host is never changed by a rename.
+- `device remove` (and `DELETE /api/devices/{name}`) now also deletes the
+  device's config file from the repository in a commit and prunes directories
+  left empty. Earlier versions remain in git history. Previously the file was
+  left behind.
+
+The database and the repository change together: if the git step fails the
+device is left as it was, with the reason in the error.
 
 ## Credential encryption
 
@@ -155,21 +183,39 @@ All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
 
 | Method & path | Description |
 |---|---|
-| `GET /api/devices` | List devices |
-| `POST /api/devices` | Add a device (JSON) |
+| `GET /api/devices` | List devices, with the outcome of each one's last backup |
+| `POST /api/devices` | Add or update a device (JSON) |
 | `GET /api/devices/{name}` | Device detail |
-| `DELETE /api/devices/{name}` | Remove a device |
+| `DELETE /api/devices/{name}` | Remove a device and its stored config |
 | `GET /api/devices/{name}/history` | Backup history |
-| `GET /api/devices/{name}/config` | Latest stored config (text) |
+| `GET /api/devices/{name}/config` | Latest stored config (text); `?commit=` for an older one |
+| `GET /api/devices/{name}/versions` | Stored versions, newest first (`?limit=`, 1–1000, default 100) |
+| `GET /api/devices/{name}/diff` | Unified diff (`?from=`, optional `&to=`) |
 | `POST /api/devices/{name}/backup` | Trigger a backup now |
 | `POST /api/devices/{name}/execute` | Run one command on the device (off by default, see below) |
 | `GET /api/credentials` | List credentials (no secrets returned) |
 | `POST /api/credentials` | Add a credential (name, username, password, enable) |
 | `DELETE /api/credentials/{name}` | Remove a credential |
 | `GET /api/drivers` | List drivers |
+| `GET /api/transports` | List transport names (JSON array of strings) |
 
 The credential `GET` only reports whether a password/key/enable is set — it never
 returns secret material.
+
+A device (list entry or detail) looks like this; `last_backup` is `null` and
+`last_status` / `last_message` are `""` until the first backup run:
+
+```json
+{"name": "core-rtr", "host": "10.0.0.1", "port": 22, "driver": "juniper_junos",
+ "transport": "", "credential": "lab", "group": "dc1", "enabled": true,
+ "last_backup": "2026-11-01T02:00:03+10:00", "last_status": "success",
+ "last_message": "configuration updated"}
+```
+
+`POST /api/devices` takes the same fields (`enabled` optional, default `true`)
+and answers `400` for an unsafe name or group. Posting an existing name updates
+it; a changed `group` moves the stored config with it. Each `/versions` entry is
+`{"commit", "date" (YYYY-MM-DD), "captured_at" (RFC 3339), "author", "subject"}`.
 
 ### Running ad-hoc commands
 

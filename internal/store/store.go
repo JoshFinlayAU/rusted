@@ -43,6 +43,12 @@ type Device struct {
 	Enabled      bool
 	// Credential is populated by lookups that join (may be nil).
 	Credential *Credential
+
+	// Populated by ListDevicesWithStatus only.
+	CredentialName string
+	LastBackup     *time.Time // start of the most recent backup run; nil if none
+	LastStatus     string     // "success", "unchanged", "failed"; "" if no runs
+	LastMessage    string     // message of the most recent run
 }
 
 // BackupRun records the outcome of a single backup attempt.
@@ -233,10 +239,14 @@ func (s *Store) DeleteCredential(name string) error {
 // --- Devices ---
 
 // CreateDevice inserts a new device. CredentialID must reference an existing
-// credential.
+// credential. The name and group become a path in the backup repository, so
+// they are validated first (errors wrap ErrInvalid).
 func (s *Store) CreateDevice(d *Device) (int64, error) {
 	if d.Port == 0 {
 		d.Port = 22
+	}
+	if err := validateDevice(d); err != nil {
+		return 0, err
 	}
 	if d.Driver == "" {
 		d.Driver = "generic"
@@ -309,6 +319,106 @@ func (s *Store) ListDevices() ([]*Device, error) {
 	return out, rows.Err()
 }
 
+// ListDevicesWithStatus is ListDevices plus the credential name and the
+// outcome of each device's most recent backup run.
+func (s *Store) ListDevicesWithStatus() ([]*Device, error) {
+	// Joining the latest run (rather than selecting its columns in subqueries)
+	// keeps started_at's declared TIMESTAMP type, so it scans into a time.
+	rows, err := s.db.Query(`SELECT ` + deviceCols + `, c.name, r.started_at, r.status, r.message
+		FROM devices d
+		LEFT JOIN credentials c ON c.id = d.credential_id
+		LEFT JOIN backup_runs r ON r.id = (
+			SELECT id FROM backup_runs WHERE device_id = d.id ORDER BY started_at DESC, id DESC LIMIT 1)
+		ORDER BY d.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Device
+	for rows.Next() {
+		var d Device
+		var cred, status, msg sql.NullString
+		var last sql.NullTime
+		if err := rows.Scan(&d.ID, &d.Name, &d.Host, &d.Port, &d.Driver, &d.Transport, &d.CredentialID, &d.Group, &d.Enabled,
+			&cred, &last, &status, &msg); err != nil {
+			return nil, err
+		}
+		d.CredentialName, d.LastStatus, d.LastMessage = cred.String, status.String, msg.String
+		if last.Valid {
+			d.LastBackup = &last.Time
+		}
+		out = append(out, &d)
+	}
+	return out, rows.Err()
+}
+
+// Hook is a side effect that must succeed or fail together with a device write,
+// such as moving the device's file in the backup repository. It runs inside the
+// database transaction after the row changed: an error rolls the row back, and
+// if the transaction then fails to commit the returned undo (if any) is called
+// to revert the side effect, so the database and the repository can't disagree.
+type Hook func() (undo func() error, err error)
+
+// UpdateDevice writes d's host, port, driver, transport, credential, group and
+// enabled flag to the row with d.ID (the name is changed only by RenameDevice),
+// running hook (may be nil) inside the transaction.
+func (s *Store) UpdateDevice(d *Device, hook Hook) error {
+	if d.Driver == "" {
+		d.Driver = "generic"
+	}
+	if err := validateDevice(d); err != nil {
+		return err
+	}
+	return s.inTx(hook, func(tx *sql.Tx) (sql.Result, error) {
+		return tx.Exec(`UPDATE devices SET host = ?, port = ?, driver = ?, transport = ?, credential_id = ?, "group" = ?, enabled = ?
+			WHERE id = ?`, d.Host, d.Port, d.Driver, d.Transport, d.CredentialID, d.Group, d.Enabled, d.ID)
+	})
+}
+
+// RenameDevice changes a device's name in place. The row keeps its id, so its
+// backup runs stay attached; host is never touched. hook (may be nil) runs
+// inside the transaction.
+func (s *Store) RenameDevice(oldName, newName string, hook Hook) error {
+	if err := ValidateDeviceName(newName); err != nil {
+		return err
+	}
+	return s.inTx(hook, func(tx *sql.Tx) (sql.Result, error) {
+		return tx.Exec(`UPDATE devices SET name = ? WHERE name = ?`, newName, oldName)
+	})
+}
+
+// inTx runs one statement that must affect a row (else ErrNotFound), then hook,
+// committing only if both succeed.
+func (s *Store) inTx(hook Hook, stmt func(*sql.Tx) (sql.Result, error)) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := stmt(tx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	var undo func() error
+	if hook != nil {
+		if undo, err = hook(); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		if undo != nil {
+			if uerr := undo(); uerr != nil {
+				return fmt.Errorf("%w (and reverting the repository change failed: %v)", err, uerr)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
 // SetDeviceEnabled toggles a device's enabled flag.
 func (s *Store) SetDeviceEnabled(name string, enabled bool) error {
 	res, err := s.db.Exec(`UPDATE devices SET enabled = ? WHERE name = ?`, enabled, name)
@@ -322,15 +432,14 @@ func (s *Store) SetDeviceEnabled(name string, enabled bool) error {
 }
 
 // DeleteDevice removes a device and its backup history.
-func (s *Store) DeleteDevice(name string) error {
-	res, err := s.db.Exec(`DELETE FROM devices WHERE name = ?`, name)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+func (s *Store) DeleteDevice(name string) error { return s.DeleteDeviceTx(name, nil) }
+
+// DeleteDeviceTx is DeleteDevice with a hook (may be nil) run inside the
+// transaction, used to remove the config file from the backup repository.
+func (s *Store) DeleteDeviceTx(name string, hook Hook) error {
+	return s.inTx(hook, func(tx *sql.Tx) (sql.Result, error) {
+		return tx.Exec(`DELETE FROM devices WHERE name = ?`, name)
+	})
 }
 
 // --- Backup runs ---

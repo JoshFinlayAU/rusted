@@ -20,7 +20,7 @@ func backupCmd() *cobra.Command {
 }
 
 func backupRunCmd() *cobra.Command {
-	var all bool
+	var all, verbose bool
 	cmd := &cobra.Command{
 		Use:   "run [NAME]",
 		Short: "Back up a device (or --all enabled devices)",
@@ -38,6 +38,9 @@ func backupRunCmd() *cobra.Command {
 				return err
 			}
 			eng := backup.New(st, gs)
+			if verbose {
+				eng.Log = os.Stderr
+			}
 			ctx := context.Background()
 
 			var results []*backup.Result
@@ -69,12 +72,22 @@ func backupRunCmd() *cobra.Command {
 			}
 			tw.Flush()
 			if failed > 0 {
+				// Repeat the failures on stderr so they survive a redirected stdout
+				// (cron mails) and stand out in a long --all table.
+				fmt.Fprintln(os.Stderr)
+				for _, r := range results {
+					if r.Status == "failed" {
+						fmt.Fprintf(os.Stderr, "FAIL %s: %s\n", r.Device, r.Message)
+					}
+				}
+				fmt.Fprintf(os.Stderr, "%d device(s) failed; see 'rusted backup history NAME' for details\n", failed)
 				return fmt.Errorf("%d device(s) failed", failed)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "back up all enabled devices")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print per-device progress to stderr")
 	return cmd
 }
 
