@@ -31,11 +31,12 @@ func (*SSHExec) Dial(ctx context.Context, t Target) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &execSession{client: client}, nil
+	return &execSession{client: client, raw: t.RawOutput}, nil
 }
 
 type execSession struct {
 	client *ssh.Client
+	raw    bool // Target.RawOutput: SendCommand returns stdout byte-exact
 }
 
 // SendCommand runs cmd in a new exec channel and returns its stdout. No prompt
@@ -54,7 +55,10 @@ func (s *execSession) SendCommand(cmd string) (string, error) {
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
 	runErr := sess.Run(cmd)
-	text := cleanExec(stdout.String())
+	text := stdout.String()
+	if !s.raw {
+		text = cleanExec(text)
+	}
 	if strings.TrimSpace(text) == "" {
 		// Nothing on stdout: whatever the device said on stderr is the only clue to
 		// why, so return it instead of an empty capture with no reason.

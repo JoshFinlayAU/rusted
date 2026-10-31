@@ -25,6 +25,10 @@ type Target struct {
 	PrivateKey []byte // optional PEM private key
 	Enable     string // optional privileged-mode password
 	Timeout    time.Duration
+	// RawOutput asks the transport to return command output byte-exact, with
+	// no CRLF folding or ANSI stripping, for drivers that capture binary data
+	// (driver.BinarySafe). Only ssh-exec honours it.
+	RawOutput bool
 }
 
 // Session is an open interactive connection to a device.
