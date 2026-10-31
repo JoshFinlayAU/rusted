@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -47,10 +49,20 @@ func (s *execSession) SendCommand(cmd string) (string, error) {
 	}
 	defer sess.Close()
 
-	out, runErr := sess.Output(cmd)
-	text := cleanExec(string(out))
-	if runErr != nil && strings.TrimSpace(text) == "" {
-		return "", runErr
+	var stdout, stderr bytes.Buffer
+	sess.Stdout = &stdout
+	sess.Stderr = &stderr
+	runErr := sess.Run(cmd)
+	text := cleanExec(stdout.String())
+	if strings.TrimSpace(text) == "" {
+		// Nothing on stdout: whatever the device said on stderr is the only clue to
+		// why, so return it instead of an empty capture with no reason.
+		if msg := strings.TrimSpace(cleanExec(stderr.String())); msg != "" {
+			return "", fmt.Errorf("%s: %s", cmd, msg)
+		}
+		if runErr != nil {
+			return "", runErr
+		}
 	}
 	return text, nil
 }

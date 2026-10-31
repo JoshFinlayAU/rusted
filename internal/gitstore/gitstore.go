@@ -53,6 +53,7 @@ func Open(dir string) (*Store, error) {
 func (s *Store) git(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = s.Dir
+	cmd.Env = gitEnv(os.Environ())
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -60,6 +61,29 @@ func (s *Store) git(args ...string) (string, error) {
 		return out.String(), fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil
+}
+
+// gitEnv fills in a commit identity when the environment doesn't carry one. The
+// repo-local identity written by Open only exists for repos rusted initialised
+// itself, and a service manager that drops privileges but keeps root's HOME
+// leaves git with no readable global config either, so commits failed with
+// "Author identity unknown". An identity the caller does set still wins.
+func gitEnv(env []string) []string {
+	defaults := map[string]string{
+		"GIT_AUTHOR_NAME":     "rusted",
+		"GIT_AUTHOR_EMAIL":    "rusted@localhost",
+		"GIT_COMMITTER_NAME":  "rusted",
+		"GIT_COMMITTER_EMAIL": "rusted@localhost",
+	}
+	for _, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			delete(defaults, k)
+		}
+	}
+	for k, v := range defaults {
+		env = append(env, k+"="+v)
+	}
+	return env
 }
 
 // SaveResult reports what happened during a Save.
