@@ -6,9 +6,10 @@ use LibreNMS\Interfaces\Plugins\Hooks\MenuEntryHook;
 
 class MenuEntry implements MenuEntryHook
 {
+    /** Only LibreNMS administrators can use the plugin (see routes/web.php). */
     public function authorize(): bool
     {
-        return true;
+        return (bool) auth()->user()?->can('admin');
     }
 
     /**

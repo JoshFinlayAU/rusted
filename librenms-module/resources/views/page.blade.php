@@ -4,9 +4,13 @@
 
 @section('content')
 <div class="container-fluid">
-    <h2><i class="fa fa-floppy-o"></i> Rusted &mdash; Configuration Backups</h2>
+    <h2><i class="fa fa-floppy-o"></i> Rusted &mdash; Configuration Backups
+        <a href="{{ route('rusted.sync') }}" class="btn btn-xs btn-default pull-right" title="Bulk add / disable LibreNMS devices">
+            <i class="fa fa-exchange"></i> Device sync
+        </a>
+    </h2>
 
-    <div id="rusted-alerts"></div>
+    @include('rusted::partials.sticky-alerts', ['id' => 'rusted-alerts'])
 
     <div class="panel panel-default">
         <div class="panel-heading">
@@ -20,28 +24,18 @@
                 <thead>
                     <tr>
                         <th>Name</th><th>Host</th><th>Port</th>
-                        <th>Driver</th><th>Group</th><th>Enabled</th><th>Actions</th>
+                        <th>Driver</th><th>Transport</th><th>Credential</th><th>Group</th>
+                        <th>Backup</th><th>Actions</th>
                     </tr>
                 </thead>
                 <tbody id="rusted-devices">
-                    <tr><td colspan="7"><em>Loading&hellip;</em></td></tr>
+                    <tr><td colspan="9"><em>Loading&hellip;</em></td></tr>
                 </tbody>
             </table>
-        </div>
-    </div>
-
-    <div id="rusted-history-panel" class="panel panel-info" style="display:none">
-        <div class="panel-heading">
-            <strong>Backup history: <span id="rusted-history-device"></span></strong>
-            <button id="rusted-history-close" class="btn btn-xs btn-default pull-right" type="button">close</button>
-        </div>
-        <div class="panel-body">
-            <table class="table table-condensed table-striped">
-                <thead>
-                    <tr><th>Started</th><th>Status</th><th>Bytes</th><th>Commit</th><th>Detail</th></tr>
-                </thead>
-                <tbody id="rusted-history"></tbody>
-            </table>
+            <p class="help-block">
+                Port, driver, transport, credential and group are edited in place and saved as soon as
+                they change. Clear the port or group to fall back to the default / no group.
+            </p>
         </div>
     </div>
 
@@ -51,9 +45,12 @@
             <form id="rusted-add" class="form-inline">
                 <input class="form-control input-sm" type="text" name="name" placeholder="name" required>
                 <input class="form-control input-sm" type="text" name="host" placeholder="host / IP" required>
-                <input class="form-control input-sm" type="number" name="port" placeholder="22" style="width:80px">
+                <input class="form-control input-sm" type="number" name="port" placeholder="22" min="1" max="65535" style="width:80px">
                 <select class="form-control input-sm" name="driver" id="rusted-driver" required>
                     <option value="" disabled selected>driver</option>
+                </select>
+                <select class="form-control input-sm" name="transport" id="rusted-transport">
+                    <option value="" selected>transport (default)</option>
                 </select>
                 <select class="form-control input-sm" name="credential" id="rusted-credential" required>
                     <option value="" disabled selected>credential</option>
@@ -96,19 +93,23 @@
 (function () {
     const RUSTED = {
         base: @json(url('plugin/rusted/api')),
+        device: @json(url('plugin/rusted/device')),
         csrf: @json(csrf_token()),
     };
 
     const $devices = document.getElementById('rusted-devices');
     const $alerts = document.getElementById('rusted-alerts');
     const $driver = document.getElementById('rusted-driver');
+    const $transport = document.getElementById('rusted-transport');
     const $form = document.getElementById('rusted-add');
-    const $historyPanel = document.getElementById('rusted-history-panel');
-    const $history = document.getElementById('rusted-history');
-    const $historyDevice = document.getElementById('rusted-history-device');
     const $credentials = document.getElementById('rusted-credentials');
     const $credForm = document.getElementById('rusted-cred-add');
     const $credential = document.getElementById('rusted-credential');
+
+    // Option lists for the inline-edit dropdowns.
+    let driverOptions = [];     // names
+    let transportOptions = [];  // names
+    let credentialOptions = []; // names
 
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
@@ -117,11 +118,7 @@
     }
 
     function alertBox(type, msg) {
-        const div = document.createElement('div');
-        div.className = 'alert alert-' + type + ' alert-dismissable';
-        div.innerHTML = '<button type="button" class="close" data-dismiss="alert">&times;</button>' + esc(msg);
-        $alerts.appendChild(div);
-        setTimeout(() => div.remove(), 8000);
+        window.rustedAlert($alerts, type, msg);
     }
 
     async function api(method, path, body) {
@@ -146,7 +143,9 @@
             if (data && data.errors) {
                 msg = Object.values(data.errors).flat().join(' ');
             }
-            throw new Error(msg);
+            const err = new Error(msg);
+            err.status = res.status;
+            throw err;
         }
         return data;
     }
@@ -155,26 +154,93 @@
         return '<span class="label label-' + kind + '">' + esc(text) + '</span>';
     }
 
+    // ---- Backup status indicator ----
+    //   never backed up              -> grey circle "never"
+    //   success/unchanged within 24h -> green check
+    //   success/unchanged older      -> grey "?" (stale, not failed)
+    //   last run failed              -> red triangle, message in the tooltip
+    function backupStatus(d) {
+        const ts = d.last_backup;
+        const st = d.last_status;
+        if (!ts) {
+            return '<span class="text-muted" title="no backups yet"><i class="fa fa-circle-o"></i> never</span>';
+        }
+        const dt = new Date(ts);
+        const when = isNaN(dt.getTime()) ? String(ts) : dt.toLocaleString();
+        const ageH = (Date.now() - dt.getTime()) / 3600000;
+        const ok = st === 'success' || st === 'unchanged';
+        let icon, color, tip;
+        if (st === 'failed') {
+            icon = 'fa-exclamation-triangle'; color = 'text-danger';
+            tip = 'Failed ' + when + (d.last_message ? ': ' + d.last_message : '');
+        } else if (!ok) {
+            icon = 'fa-question-circle'; color = 'text-muted';
+            tip = (st ? st + ' ' : '') + when;
+        } else if (ageH < 24) {
+            icon = 'fa-check-circle'; color = 'text-success';
+            tip = 'Up to date (' + when + ')';
+        } else {
+            icon = 'fa-question-circle'; color = 'text-muted';
+            tip = 'Last backup ' + Math.floor(ageH) + 'h ago (' + when + ')';
+        }
+        // tip carries device-supplied text (last_message): always escape it.
+        return '<span class="' + color + '" title="' + esc(tip) + '"><i class="fa ' + icon + '"></i></span>';
+    }
+
+    // A <select> for an inline-edited field. The device's current value is
+    // always present (even if the option list lacks it) so the select never
+    // silently shows a different value from the one stored.
+    function editSelect(d, field, options, emptyLabel) {
+        const current = d[field] == null ? '' : String(d[field]);
+        const values = options.slice();
+        if (current !== '' && values.indexOf(current) === -1) values.unshift(current);
+        let html = '';
+        if (emptyLabel !== null) {
+            html += '<option value=""' + (current === '' ? ' selected' : '') + '>' + esc(emptyLabel) + '</option>';
+        } else if (current === '') {
+            html += '<option value="" selected disabled>(unknown)</option>';
+        }
+        html += values.map(v =>
+            '<option value="' + esc(v) + '"' + (v === current ? ' selected' : '') + '>' + esc(v) + '</option>'
+        ).join('');
+        return '<select class="form-control input-sm rusted-edit" data-field="' + field + '" data-name="' + esc(d.name) + '">' + html + '</select>';
+    }
+
+    function editInput(d, field, type, placeholder, width) {
+        const v = d[field] == null || d[field] === 0 ? '' : d[field];
+        return '<input type="' + type + '" class="form-control input-sm rusted-edit" data-field="' + field + '" ' +
+            'data-name="' + esc(d.name) + '" value="' + esc(v) + '" placeholder="' + esc(placeholder) + '" ' +
+            'data-orig="' + esc(v) + '" style="width:' + width + '">';
+    }
+
+    // ---- Render devices ----
     function renderDevices(devices) {
         if (!devices || !devices.length) {
-            $devices.innerHTML = '<tr><td colspan="7"><em>No devices yet.</em></td></tr>';
+            $devices.innerHTML = '<tr><td colspan="9"><em>No devices yet.</em></td></tr>';
             return;
         }
         $devices.innerHTML = devices.map(function (d) {
-            const enabled = d.enabled ? label('yes', 'success') : label('no', 'default');
             const n = esc(d.name);
-            return '<tr>' +
-                '<td>' + esc(d.name) + '</td>' +
+            const isEnabled = (d.enabled !== false);
+            const toggleClass = isEnabled ? 'btn-success' : 'btn-danger';
+            const toggleTitle = isEnabled
+                ? 'Enabled — click to disable (stops backups, keeps history)'
+                : 'Disabled — click to enable (resumes backups)';
+            return '<tr' + (isEnabled ? '' : ' class="text-muted"') + '>' +
+                '<td><a href="' + esc(RUSTED.device + '/' + encodeURIComponent(d.name)) + '">' + n + '</a></td>' +
                 '<td>' + esc(d.host) + '</td>' +
-                '<td>' + esc(d.port) + '</td>' +
-                '<td>' + esc(d.driver) + '</td>' +
-                '<td>' + (d.group ? esc(d.group) : '-') + '</td>' +
-                '<td>' + enabled + '</td>' +
-                '<td>' +
-                    '<button class="btn btn-xs btn-primary" data-action="backup" data-name="' + n + '"><i class="fa fa-download"></i> Backup</button> ' +
-                    '<button class="btn btn-xs btn-default" data-action="history" data-name="' + n + '"><i class="fa fa-history"></i> History</button> ' +
-                    '<button class="btn btn-xs btn-danger" data-action="remove" data-name="' + n + '"><i class="fa fa-trash"></i> Remove</button>' +
-                '</td>' +
+                '<td>' + editInput(d, 'port', 'number', '22', '75px') + '</td>' +
+                '<td>' + editSelect(d, 'driver', driverOptions, null) + '</td>' +
+                '<td>' + editSelect(d, 'transport', transportOptions, 'default') + '</td>' +
+                '<td>' + editSelect(d, 'credential', credentialOptions, null) + '</td>' +
+                '<td>' + editInput(d, 'group', 'text', '-', '100px') + '</td>' +
+                '<td>' + backupStatus(d) + '</td>' +
+                '<td><div class="btn-group btn-group-xs" role="group">' +
+                    '<button class="btn btn-xs ' + toggleClass + '" data-action="toggle" data-name="' + n + '" data-enabled="' + (isEnabled ? '1' : '0') + '" title="' + toggleTitle + '"><i class="fa fa-power-off"></i></button>' +
+                    '<button class="btn btn-xs btn-default" data-action="backup" data-name="' + n + '" title="Back up now"><i class="fa fa-download"></i></button>' +
+                    '<button class="btn btn-xs btn-default" data-action="history" data-name="' + n + '" title="History, configuration and diff"><i class="fa fa-clock-o"></i></button>' +
+                    '<button class="btn btn-xs btn-danger" data-action="remove" data-name="' + n + '" title="Delete (downloads the configuration history as a zip first)"><i class="fa fa-trash-o"></i></button>' +
+                '</div></td>' +
             '</tr>';
         }).join('');
     }
@@ -183,23 +249,33 @@
         try {
             renderDevices(await api('GET', '/devices'));
         } catch (e) {
-            $devices.innerHTML = '<tr><td colspan="7"><em>Could not load devices.</em></td></tr>';
+            $devices.innerHTML = '<tr><td colspan="9"><em>Could not load devices.</em></td></tr>';
             alertBox('warning', e.message);
         }
     }
 
     async function loadDrivers() {
         try {
-            const drivers = await api('GET', '/drivers');
-            (drivers || []).forEach(function (drv) {
-                const opt = document.createElement('option');
-                opt.value = drv.name;
-                opt.textContent = drv.name;
-                $driver.appendChild(opt);
-            });
+            const drivers = await api('GET', '/drivers') || [];
+            driverOptions = drivers.map(d => d.name);
+            $driver.innerHTML = '<option value="" disabled selected>driver</option>' +
+                driverOptions.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
         } catch (e) {
             alertBox('warning', 'Could not load drivers: ' + e.message);
         }
+    }
+
+    // An older rusted without /api/transports yields [] (the receiver maps
+    // its 404), leaving only the server-default choice.
+    async function loadTransports() {
+        try {
+            const list = await api('GET', '/transports');
+            transportOptions = Array.isArray(list) ? list.map(String) : [];
+        } catch (e) {
+            transportOptions = [];
+        }
+        $transport.innerHTML = '<option value="" selected>transport (default)</option>' +
+            transportOptions.map(t => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('');
     }
 
     function renderCredentials(creds) {
@@ -231,21 +307,29 @@
 
     async function loadCredentials() {
         try {
-            renderCredentials(await api('GET', '/credentials'));
+            const creds = await api('GET', '/credentials') || [];
+            credentialOptions = creds.map(c => c.name);
+            renderCredentials(creds);
         } catch (e) {
             $credentials.innerHTML = '<tr><td colspan="6"><em>Could not load credentials.</em></td></tr>';
             alertBox('warning', e.message);
         }
     }
 
+    // Load the option lists first so the device rows' dropdowns are complete.
+    async function loadAll() {
+        await Promise.all([loadDrivers(), loadTransports(), loadCredentials()]);
+        await loadDevices();
+    }
+
     async function doBackup(name, btn) {
         const original = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Backing up&hellip;';
+        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i>';
         try {
             const r = await api('POST', '/devices/' + encodeURIComponent(name) + '/backup');
-            const status = r.status || 'done';
-            const detail = r.message || '';
+            const status = (r && r.status) || 'done';
+            const detail = (r && r.message) || '';
             const kind = status === 'failed' ? 'danger' : 'success';
             alertBox(kind, 'Backup of ' + name + ': ' + status + (detail ? ' — ' + detail : ''));
         } catch (e) {
@@ -253,59 +337,115 @@
         } finally {
             btn.disabled = false;
             btn.innerHTML = original;
-        }
-    }
-
-    async function doRemove(name) {
-        if (!confirm('Remove ' + name + '?')) return;
-        try {
-            await api('DELETE', '/devices/' + encodeURIComponent(name));
-            alertBox('success', 'Device ' + name + ' removed.');
             loadDevices();
-        } catch (e) {
-            alertBox('danger', 'Remove failed: ' + e.message);
         }
     }
 
-    async function showHistory(name) {
-        $historyDevice.textContent = name;
-        $history.innerHTML = '<tr><td colspan="5"><em>Loading&hellip;</em></td></tr>';
-        $historyPanel.style.display = '';
+    // Fetch a zip as a Blob and hand it to the browser as a download, so the
+    // caller knows whether it succeeded before doing anything destructive.
+    async function downloadBlob(path, filename) {
+        const res = await fetch(RUSTED.base + path, {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/zip', 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        if (!res.ok) {
+            const err = new Error('HTTP ' + res.status);
+            err.status = res.status;
+            throw err;
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    }
+
+    // Enable / disable (never deletes; history is kept).
+    async function doToggle(name, btn) {
+        const wasEnabled = btn.getAttribute('data-enabled') === '1';
         try {
-            const runs = await api('GET', '/devices/' + encodeURIComponent(name) + '/history');
-            if (!runs || !runs.length) {
-                $history.innerHTML = '<tr><td colspan="5"><em>No backup runs recorded.</em></td></tr>';
+            await api('POST', '/devices/' + encodeURIComponent(name) + '/enabled', { enabled: !wasEnabled });
+            alertBox('success', name + ' is now ' + (wasEnabled ? 'disabled' : 'enabled') + '.');
+        } catch (e) {
+            alertBox('danger', 'Could not ' + (wasEnabled ? 'disable ' : 'enable ') + name + ': ' + e.message);
+        }
+        loadDevices();
+    }
+
+    // Delete: the device's configuration history is downloaded as a zip
+    // first, and the delete only proceeds once that has succeeded.
+    async function doRemove(name) {
+        if (!confirm('Delete ' + name + ' from rusted?\n\n' +
+            'Its full configuration history is downloaded as a zip first; ' +
+            'the device is deleted only if that download succeeds.')) return;
+
+        const safe = String(name).replace(/[^A-Za-z0-9._-]+/g, '_');
+        try {
+            await downloadBlob('/devices/' + encodeURIComponent(name) + '/history/zip', 'rusted-history-' + safe + '.zip');
+        } catch (e) {
+            if (e.status !== 404) {
+                alertBox('danger', 'Could not download the configuration archive: ' + e.message +
+                    '\nThe device was NOT deleted.');
                 return;
             }
-            $history.innerHTML = runs.map(function (r) {
-                const s = r.status || '';
-                const kind = s === 'success' ? 'success' : (s === 'failed' ? 'danger' : 'default');
-                const commit = (r.commit || '').substring(0, 8);
-                return '<tr>' +
-                    '<td>' + esc(r.started_at) + '</td>' +
-                    '<td>' + label(s, kind) + '</td>' +
-                    '<td>' + esc(r.bytes || 0) + '</td>' +
-                    '<td><code>' + esc(commit) + '</code></td>' +
-                    '<td>' + esc(r.message) + '</td>' +
-                '</tr>';
-            }).join('');
-        } catch (e) {
-            $history.innerHTML = '<tr><td colspan="5"><em>Could not load history.</em></td></tr>';
-            alertBox('warning', e.message);
+            if (!confirm(name + ' has no stored configuration to archive. Delete it anyway?')) return;
         }
+
+        try {
+            await api('DELETE', '/devices/' + encodeURIComponent(name));
+            alertBox('success', name + ' deleted from rusted.');
+        } catch (e) {
+            alertBox('danger', 'Delete of ' + name + ' failed: ' + e.message);
+        }
+        loadDevices();
     }
 
-    // Event delegation for per-row action buttons.
+    // Inline edit: save one field. An empty value is sent as "" so optional
+    // fields (group, port, transport) can be cleared.
+    async function doInlineEdit(el) {
+        const name = el.getAttribute('data-name');
+        const field = el.getAttribute('data-field');
+        let value = el.value.trim();
+        if (field === 'port') {
+            value = value === '' ? 0 : parseInt(value, 10);
+            if (isNaN(value) || value < 0 || value > 65535) {
+                alertBox('warning', 'Port must be between 1 and 65535 (empty for the default).');
+                el.value = el.getAttribute('data-orig') || '';
+                return;
+            }
+        }
+        el.disabled = true;
+        try {
+            await api('PUT', '/devices/' + encodeURIComponent(name), { [field]: value });
+            alertBox('success', name + ': ' + field + ' updated.');
+        } catch (e) {
+            alertBox('danger', 'Could not update ' + field + ' for ' + name + ': ' + e.message);
+        }
+        loadDevices();
+    }
+
+    // Row actions.
     $devices.addEventListener('click', function (e) {
         const btn = e.target.closest('button[data-action]');
         if (!btn) return;
         const name = btn.getAttribute('data-name');
-        if (btn.dataset.action === 'backup') doBackup(name, btn);
-        else if (btn.dataset.action === 'remove') doRemove(name);
-        else if (btn.dataset.action === 'history') showHistory(name);
+        const action = btn.getAttribute('data-action');
+        if (action === 'toggle') doToggle(name, btn);
+        else if (action === 'backup') doBackup(name, btn);
+        else if (action === 'history') window.location.href = RUSTED.device + '/' + encodeURIComponent(name);
+        else if (action === 'remove') doRemove(name);
     });
 
-    // Event delegation for credential remove buttons.
+    // Inline edits: "change" fires on select change, and on blur/Enter for inputs.
+    $devices.addEventListener('change', function (e) {
+        const el = e.target.closest('.rusted-edit');
+        if (el) doInlineEdit(el);
+    });
+
     $credentials.addEventListener('click', function (e) {
         const btn = e.target.closest('button[data-action="remove-cred"]');
         if (!btn) return;
@@ -317,7 +457,8 @@
         try {
             await api('DELETE', '/credentials/' + encodeURIComponent(name));
             alertBox('success', 'Credential ' + name + ' removed.');
-            loadCredentials();
+            await loadCredentials();
+            loadDevices();
         } catch (e) {
             alertBox('danger', 'Remove failed: ' + e.message);
         }
@@ -336,19 +477,14 @@
             await api('POST', '/credentials', payload);
             alertBox('success', 'Credential ' + payload.name + ' added.');
             $credForm.reset();
-            loadCredentials();
+            await loadCredentials();
+            loadDevices();
         } catch (e) {
             alertBox('danger', 'Add failed: ' + e.message);
         }
     });
 
-    document.getElementById('rusted-refresh').addEventListener('click', function () {
-        loadDevices();
-        loadCredentials();
-    });
-    document.getElementById('rusted-history-close').addEventListener('click', function () {
-        $historyPanel.style.display = 'none';
-    });
+    document.getElementById('rusted-refresh').addEventListener('click', loadAll);
 
     $form.addEventListener('submit', async function (e) {
         e.preventDefault();
@@ -362,6 +498,8 @@
         };
         const port = fd.get('port');
         if (port) payload.port = parseInt(port, 10);
+        const transport = fd.get('transport');
+        if (transport) payload.transport = transport;
         try {
             await api('POST', '/devices', payload);
             alertBox('success', 'Device ' + payload.name + ' added.');
@@ -372,10 +510,7 @@
         }
     });
 
-    // Initial load.
-    loadDrivers();
-    loadCredentials();
-    loadDevices();
+    loadAll();
 })();
 </script>
 @endsection
