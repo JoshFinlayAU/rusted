@@ -16,15 +16,17 @@ use LibreNMS\Interfaces\Plugins\Hooks\DeviceOverviewHook;
  */
 class DeviceOverview implements DeviceOverviewHook
 {
+    /** The panel's AJAX routes are admin-only, so only admins see the panel. */
     public function authorize(User $user, Device $device): bool
     {
-        return true;
+        return $user->can('admin');
     }
 
     public function handle(string $pluginName, array $settings, Device $device): View
     {
         return view("$pluginName::device-overview", [
             'hostname' => $device->hostname,
+            'deviceUrl' => route('rusted.device.show', ['name' => $device->hostname]),
         ]);
     }
 }

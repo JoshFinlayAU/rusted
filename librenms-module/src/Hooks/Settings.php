@@ -10,7 +10,7 @@ class Settings implements SettingsHook
 {
     public function authorize(User $user): bool
     {
-        return true;
+        return $user->can('admin');
     }
 
     /**
