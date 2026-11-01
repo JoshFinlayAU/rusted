@@ -11,8 +11,8 @@ use LibreNMS\Interfaces\Plugins\Hooks\DeviceOverviewHook;
  * Renders a "Configuration Backups" panel on every device's Overview page.
  *
  * The panel itself is loaded by LibreNMS server-side; its contents are then
- * populated by the browser via the same-origin AJAX receiver, keyed on the
- * device hostname (which is matched against the rusted device name).
+ * populated by the browser via the same-origin AJAX receiver, which first asks
+ * which rusted device this LibreNMS device maps to (see Support\DeviceMap).
  */
 class DeviceOverview implements DeviceOverviewHook
 {
@@ -25,8 +25,8 @@ class DeviceOverview implements DeviceOverviewHook
     public function handle(string $pluginName, array $settings, Device $device): View
     {
         return view("$pluginName::device-overview", [
-            'hostname' => $device->hostname,
-            'deviceUrl' => route('rusted.device.show', ['name' => $device->hostname]),
+            'deviceId' => $device->device_id,
+            'deviceBase' => url('plugin/rusted/device'),
         ]);
     }
 }

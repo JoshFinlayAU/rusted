@@ -15,8 +15,8 @@
     const RUSTED = {
         base: @json(url('plugin/rusted/api')),
         csrf: @json(csrf_token()),
-        host: @json($hostname),
-        deviceUrl: @json($deviceUrl),
+        deviceId: @json($deviceId),
+        deviceBase: @json($deviceBase),
     };
     const $body = document.getElementById('rusted-do-body');
 
@@ -58,12 +58,26 @@
         return s === 'success' ? 'success' : (s === 'failed' ? 'danger' : (s === 'unchanged' ? 'info' : 'default'));
     }
 
-    const dev = encodeURIComponent(RUSTED.host);
+    // target is this LibreNMS device seen from rusted: name is its rusted device
+    // (null if none), suggested and host what it would be added with. dev is
+    // name, URL-encoded for the API paths.
+    let target = null;
+    let dev = '';
     let currentDevice = null;
 
     async function render() {
         $body.innerHTML = '<em>Loading&hellip;</em>';
         currentDevice = null;
+        const m = await api('GET', '/librenms/' + RUSTED.deviceId);
+        if (!m.ok || !m.data) {
+            $body.innerHTML = '<div class="text-warning">Rusted API error: ' + esc(errorOf(m)) + '</div>';
+            return;
+        }
+        target = m.data;
+        if (!target.name) {
+            return renderUnmanaged();
+        }
+        dev = encodeURIComponent(target.name);
         const d = await api('GET', '/devices/' + dev);
 
         if (d.status === 404) {
@@ -100,13 +114,14 @@
 
         $body.innerHTML =
             '<table class="table table-condensed" style="margin-bottom:8px">' +
-            '<tr><th style="width:120px">Driver</th><td>' + esc(device.driver) + '</td></tr>' +
+            '<tr><th style="width:120px">Name in rusted</th><td>' + esc(target.name) + '</td></tr>' +
+            '<tr><th>Driver</th><td>' + esc(device.driver) + '</td></tr>' +
             '<tr><th>Last backup</th><td>' + lastHtml + '</td></tr>' +
             '</table>' +
             '<div class="btn-group btn-group-xs" role="group">' +
             '<button type="button" class="btn btn-xs ' + toggleClass + '" id="rusted-do-toggle" title="' + toggleTitle + '"><i class="fa fa-power-off"></i></button>' +
             '<button type="button" class="btn btn-xs btn-default" id="rusted-do-backup" title="Back up now"><i class="fa fa-download"></i></button>' +
-            '<a class="btn btn-xs btn-default" href="' + esc(RUSTED.deviceUrl) + '" title="History, configuration and diff"><i class="fa fa-clock-o"></i></a>' +
+            '<a class="btn btn-xs btn-default" href="' + esc(RUSTED.deviceBase + '/' + dev) + '" title="History, configuration and diff"><i class="fa fa-clock-o"></i></a>' +
             '<button type="button" class="btn btn-xs btn-danger" id="rusted-do-remove" title="Delete from rusted (downloads the configuration history first)"><i class="fa fa-trash-o"></i></button>' +
             '</div>';
 
@@ -164,11 +179,11 @@
     // device is only deleted once that has succeeded.
     async function doRemove() {
         if (!currentDevice) return;
-        if (!confirm('Delete ' + RUSTED.host + ' from rusted?\n\n' +
+        if (!confirm('Delete ' + target.name + ' from rusted?\n\n' +
             'Its full configuration history is downloaded as a zip first; ' +
             'the device is deleted only if that download succeeds.')) return;
 
-        const safe = String(RUSTED.host).replace(/[^A-Za-z0-9._-]+/g, '_');
+        const safe = String(target.name).replace(/[^A-Za-z0-9._-]+/g, '_');
         try {
             await downloadBlob('/devices/' + dev + '/history/zip', 'rusted-history-' + safe + '.zip');
         } catch (e) {
@@ -196,7 +211,7 @@
         const credOpts = creds.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + ' (' + esc(c.username) + ')</option>').join('');
 
         $body.innerHTML =
-            '<p class="text-muted">This device is not managed by rusted.</p>' +
+            '<p class="text-muted">This device is not managed by rusted. It would be added as <strong>' + esc(target.suggested) + '</strong>.</p>' +
             '<div class="form-group"><select id="rusted-do-driver" class="form-control input-sm">' +
                 '<option value="" disabled selected>driver</option>' + driverOpts + '</select></div>' +
             '<div class="form-group"><select id="rusted-do-cred" class="form-control input-sm">' +
@@ -217,7 +232,7 @@
             return;
         }
         const r = await api('POST', '/devices', {
-            name: RUSTED.host, host: RUSTED.host, driver: driver, credential: credential,
+            name: target.suggested, host: target.host, driver: driver, credential: credential,
         });
         if (!r.ok) {
             alert('Add failed: ' + errorOf(r));

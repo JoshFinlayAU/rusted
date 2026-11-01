@@ -3,6 +3,7 @@
 namespace AthenaNetworks\RustedLibrenms\Controllers;
 
 use App\Models\Device;
+use AthenaNetworks\RustedLibrenms\Support\DeviceMap;
 use AthenaNetworks\RustedLibrenms\Support\RustedClient;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\JsonResponse;
@@ -270,8 +271,8 @@ class RustedController extends Controller
     // --- Bulk sync -----------------------------------------------------------
 
     /**
-     * Join LibreNMS devices against the rusted inventory (LibreNMS hostname ==
-     * rusted device name, case-insensitive):
+     * Join LibreNMS devices against the rusted inventory (see DeviceMap for how
+     * they are matched):
      *  - left:  LibreNMS devices not actively backed up (absent from rusted,
      *           or disabled there; `rust_state` tells which).
      *  - right: enabled rusted devices that are also in LibreNMS.
@@ -288,67 +289,66 @@ class RustedController extends Controller
             return $this->relay($resp);
         }
         $rusted = is_array($resp->json()) ? $resp->json() : [];
+        $map = new DeviceMap($rusted);
 
         $libre = Device::query()
             ->whereNotNull('hostname')
             ->where('hostname', '!=', '')
-            ->select(['hostname', 'sysName', 'os', 'status', 'disabled'])
             ->orderBy('hostname')
             ->get();
 
-        $libreNames = [];
+        // Left: LibreNMS devices with no enabled rusted device, listed under the
+        // name they have (or would get) in rusted.
+        $left = [];
+        $matched = [];
         foreach ($libre as $d) {
-            $libreNames[strtolower($d->hostname)] = true;
+            $r = $map->find($d);
+            if ($r !== null) {
+                $matched[strtolower((string) $r['name'])] = true;
+                if ((bool) ($r['enabled'] ?? true)) {
+                    continue;
+                }
+            }
+            $left[] = [
+                'id' => $d->device_id,
+                'name' => $r['name'] ?? $map->nameFor($d),
+                'hostname' => $d->hostname,
+                'os' => $d->os,
+                'status' => (bool) $d->status,
+                'disabled' => (bool) $d->disabled,
+                'rust_state' => $r !== null ? 'disabled' : 'absent',
+            ];
         }
 
-        $enabledRusted = [];
-        $disabledRusted = [];
+        // Right: enabled rusted devices; greyed when no LibreNMS device maps to them.
         $right = [];
         $grey = [];
         foreach ($rusted as $r) {
-            if (! is_array($r) || empty($r['name'])) {
+            if (! is_array($r) || (string) ($r['name'] ?? '') === '') { // not empty(): "0" is a valid name
                 continue;
             }
-            $low = strtolower($r['name']);
             $entry = [
                 'name' => $r['name'],
+                'host' => $r['host'] ?? '',
                 'driver' => $r['driver'] ?? '',
                 'group' => $r['group'] ?? '',
                 'enabled' => (bool) ($r['enabled'] ?? true),
             ];
-            if (! isset($libreNames[$low])) {
+            if (! isset($matched[strtolower((string) $r['name'])])) {
                 $grey[] = $entry;
             } elseif ($entry['enabled']) {
-                $enabledRusted[$low] = true;
                 $right[] = $entry;
-            } else {
-                $disabledRusted[$low] = true;
             }
-        }
-
-        $left = [];
-        foreach ($libre as $d) {
-            $low = strtolower($d->hostname);
-            if (isset($enabledRusted[$low])) {
-                continue;
-            }
-            $left[] = [
-                'name' => $d->hostname,
-                'os' => $d->os,
-                'sysName' => $d->sysName,
-                'status' => (bool) $d->status,
-                'disabled' => (bool) $d->disabled,
-                'rust_state' => isset($disabledRusted[$low]) ? 'disabled' : 'absent',
-            ];
         }
 
         return response()->json(['left' => $left, 'right' => $right, 'grey' => $grey]);
     }
 
     /**
-     * Add LibreNMS devices to rusted in one batch with a single driver and
-     * credential. Devices already in rusted (disabled) are re-enabled with the
-     * new driver/credential; everything else on them is kept.
+     * Add LibreNMS devices (by device_id) to rusted in one batch with a single
+     * driver and credential. A device that already has a rusted device (see
+     * DeviceMap) updates and re-enables that one; any other is created under
+     * its LibreNMS display name, connecting to its LibreNMS hostname.
      */
     public function syncAdd(Request $request): JsonResponse
     {
@@ -356,30 +356,61 @@ class RustedController extends Controller
             'driver' => 'required|string',
             'credential' => 'required|string',
             'devices' => 'required|array|min:1',
-            'devices.*' => 'required|string',
+            'devices.*' => 'required|integer',
         ]);
 
-        // Only hostnames LibreNMS actually knows may be added from here.
-        $known = Device::query()->whereIn('hostname', $data['devices'])->pluck('hostname')->all();
+        try {
+            $map = DeviceMap::load();
+        } catch (\Throwable $e) {
+            return $this->unreachable($e);
+        }
+        $libre = Device::query()->whereIn('device_id', $data['devices'])->get()->keyBy('device_id');
 
         $added = [];
         $failed = [];
-        foreach ($data['devices'] as $host) {
-            if (! in_array($host, $known, true)) {
-                $failed[] = ['name' => $host, 'error' => 'not a LibreNMS device'];
+        foreach ($data['devices'] as $id) {
+            $d = $libre->get($id);
+            if ($d === null) {
+                $failed[] = ['name' => (string) $id, 'error' => 'not a LibreNMS device'];
                 continue;
             }
+            $name = $map->find($d)['name'] ?? $map->nameFor($d);
 
             $changes = ['driver' => $data['driver'], 'credential' => $data['credential'], 'enabled' => true];
-            $r = $this->upsertDevice($host, $changes, ['name' => $host, 'host' => $host]);
+            $r = $this->upsertDevice($name, $changes, ['name' => $name, 'host' => $d->hostname]);
             if ($r->getStatusCode() < 300) {
-                $added[] = $host;
+                $added[] = $name;
+                $map->add(['name' => $name, 'host' => $d->hostname]);
             } else {
-                $failed[] = ['name' => $host, 'error' => $r->getData(true)['error'] ?? ('HTTP '.$r->getStatusCode())];
+                $failed[] = ['name' => $name, 'error' => $r->getData(true)['error'] ?? ('HTTP '.$r->getStatusCode())];
             }
         }
 
         return response()->json(['added' => $added, 'failed' => $failed]);
+    }
+
+    /**
+     * The rusted side of one LibreNMS device, for its Overview panel: the name
+     * of its rusted device (null if it has none), plus the name and host it
+     * would be added with.
+     */
+    public function libreDevice(int $id): JsonResponse
+    {
+        $d = Device::find($id);
+        if ($d === null) {
+            return response()->json(['error' => 'not a LibreNMS device'], 404);
+        }
+        try {
+            $map = DeviceMap::load();
+        } catch (\Throwable $e) {
+            return $this->unreachable($e);
+        }
+
+        return response()->json([
+            'name' => $map->find($d)['name'] ?? null,
+            'suggested' => $map->nameFor($d),
+            'host' => $d->hostname,
+        ]);
     }
 
     /**
