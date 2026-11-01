@@ -39,6 +39,7 @@ func rootCmd() *cobra.Command {
 		Short: "Network device configuration backup tool (RANCID/Oxidized replacement)",
 		Long: "rusted backs up network device configurations over SSH and versions " +
 			"them in a git repository. Credentials and devices are stored in SQLite.",
+		Version:       buildVersion(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {

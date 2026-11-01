@@ -26,16 +26,30 @@ func configInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Write a config file with a generated API token and encryption secret",
-		Long: "Creates a config file (user-level by default, or system-wide with --global) " +
+		Long: "Creates a config file (at --config or $RUSTED_CONFIG if set, else user-level, or system-wide with --global) " +
 			"containing a randomly generated API token and encryption secret, plus database " +
 			"and backup paths. Existing files are not overwritten unless --force is given.",
+		// The file being created needn't exist yet, so skip the root's config loading
+		// (which fails on a missing --config).
+		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := config.UserConfigPath()
+			// Write where the other commands will look: --config, else
+			// $RUSTED_CONFIG, else the user (or, with --global, system) path.
+			path := flagConfig
+			if path == "" {
+				path = os.Getenv("RUSTED_CONFIG")
+			}
+			if path != "" && global {
+				return fmt.Errorf("--global writes %s; it can't be combined with --config or RUSTED_CONFIG", config.GlobalConfigPath)
+			}
+			if path == "" {
+				path = config.UserConfigPath()
+				if global {
+					path = config.GlobalConfigPath
+				}
+			}
 			if dataDir == "" {
 				dataDir = defaultDataDir(global)
-			}
-			if global {
-				path = config.GlobalConfigPath
 			}
 			if path == "" {
 				return fmt.Errorf("could not determine config path")

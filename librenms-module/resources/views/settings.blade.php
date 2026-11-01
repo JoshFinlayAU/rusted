@@ -32,5 +32,21 @@ RUSTED_API_TOKEN=your-secret-token</pre>
                 @endif
             </td>
         </tr>
+        <tr>
+            <th>rusted version</th>
+            <td>
+                @if ($version === null)
+                    <span class="text-muted">unknown (not reachable)</span>
+                @elseif ($version === '')
+                    <span class="label label-warning">older than 0.2.1</span>
+                    <small class="text-muted">it does not report a version; this plugin needs {{ $min_version }} or newer</small>
+                @elseif ($outdated)
+                    <span class="label label-danger">{{ $version }}</span>
+                    <small class="text-danger">this plugin needs {{ $min_version }} or newer; upgrade rusted</small>
+                @else
+                    <span class="label label-success">{{ $version }}</span>
+                @endif
+            </td>
+        </tr>
     </table>
 </div>

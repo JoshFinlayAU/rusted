@@ -41,7 +41,9 @@ func (s *fakeSession) Close() error { return nil }
 
 func TestEngineEndToEnd(t *testing.T) {
 	calls := 0
-	transport.Register(fakeTransport{calls: &calls})
+	ft := fakeTransport{calls: &calls}
+	transport.Register(ft)
+	t.Cleanup(func() { transport.Unregister(ft.Name()) })
 
 	st, err := store.Open(t.TempDir() + "/r.db")
 	if err != nil {
@@ -132,6 +134,7 @@ func (s scriptSession) Close() error                           { return nil }
 func newTestEngine(t *testing.T, drv string, tr scriptTransport) (*Engine, *store.Store, *gitstore.Store) {
 	t.Helper()
 	transport.Register(tr)
+	t.Cleanup(func() { transport.Unregister(tr.Name()) })
 	st, err := store.Open(t.TempDir() + "/r.db")
 	if err != nil {
 		t.Fatal(err)

@@ -35,10 +35,11 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 			srv := &api.Server{
-				Store:  st,
-				Git:    gs,
-				Engine: backup.New(st, gs),
-				Token:  token,
+				Store:   st,
+				Git:     gs,
+				Engine:  backup.New(st, gs),
+				Token:   token,
+				Version: buildVersion(),
 				// The flag can only turn exec on; it can't override api_exec = true.
 				AllowExec: allowExec || cfg.APIExec,
 			}

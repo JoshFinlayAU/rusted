@@ -32,4 +32,19 @@ class RustedClient
             return false;
         }
     }
+
+    /**
+     * The version rusted reports on /healthz: null when unreachable, "" when
+     * the server is older than 0.2.1 and does not report one.
+     */
+    public static function serverVersion(): ?string
+    {
+        try {
+            $resp = self::client()->get('/healthz');
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $resp->successful() ? (string) ($resp->json('version') ?? '') : null;
+    }
 }

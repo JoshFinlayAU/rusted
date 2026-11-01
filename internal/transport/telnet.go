@@ -50,7 +50,7 @@ func (*Telnet) Dial(ctx context.Context, t Target) (Session, error) {
 	addr := net.JoinHostPort(t.Host, strconv.Itoa(t.Port))
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", addr, err)
+		return nil, err // a *net.OpError already reads "dial tcp <addr>: ..."
 	}
 
 	s := &telnetSession{conn: conn, writeTimeout: t.Timeout}
