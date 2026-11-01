@@ -27,6 +27,9 @@ Route::middleware(['web', 'auth', 'can:admin'])->prefix('plugin/rusted')->name('
         Route::post('credentials', [RustedController::class, 'apiAddCredential'])->name('credentials.add');
         Route::delete('credentials/{name}', [RustedController::class, 'apiRemoveCredential'])->name('credentials.remove');
 
+        // Which rusted device (if any) a LibreNMS device maps to; see DeviceMap.
+        Route::get('librenms/{id}', [RustedController::class, 'libreDevice'])->whereNumber('id')->name('librenms.device');
+
         Route::get('devices', [RustedController::class, 'apiDevices'])->name('devices');
         Route::post('devices', [RustedController::class, 'apiAddDevice'])->name('devices.add');
         Route::get('devices/{name}', [RustedController::class, 'apiDevice'])->name('devices.show');

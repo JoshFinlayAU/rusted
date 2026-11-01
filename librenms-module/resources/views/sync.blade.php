@@ -18,7 +18,7 @@
         <div class="col-md-4">
             <h4>In LibreNMS, not backed up</h4>
             <input id="sync-left-filter" class="form-control input-sm" type="text"
-                   placeholder="regex filter (hostname / os)">
+                   placeholder="regex filter (name / hostname / os)">
             <div id="sync-left" class="list-group" style="max-height:500px;overflow:auto">
                 <div class="list-group-item"><em>Loading&hellip;</em></div>
             </div>
@@ -52,7 +52,7 @@
         <div class="col-md-4">
             <h4>Backed up by rusted</h4>
             <input id="sync-right-filter" class="form-control input-sm" type="text"
-                   placeholder="regex filter (hostname / driver)">
+                   placeholder="regex filter (name / host / driver)">
             <div id="sync-right" class="list-group" style="max-height:500px;overflow:auto">
                 <div class="list-group-item"><em>Loading&hellip;</em></div>
             </div>
@@ -130,10 +130,14 @@
                 : '';
             const flags = (d.disabled ? '<span class="label label-warning">disabled</span> ' : '')
                 + (!d.status ? '<span class="label label-danger">down</span>' : '');
-            return '<label class="list-group-item" data-host="' + esc(d.name) + '" data-meta="' + esc(d.os || '') + '"'
+            const hostNote = d.hostname && d.hostname !== d.name
+                ? ' <small class="text-muted">' + esc(d.hostname) + '</small>'
+                : '';
+            return '<label class="list-group-item" data-id="' + esc(d.id) + '" data-host="' + esc(d.name) + '"'
+                + ' data-meta="' + esc((d.hostname || '') + ' ' + (d.os || '')) + '"'
                 + ' style="font-weight:normal;cursor:pointer' + (d.disabled ? ';opacity:0.6' : '') + '">'
                 + '<input type="checkbox" class="sync-check"> '
-                + '<strong>' + esc(d.name) + '</strong> ' + rustNote + flags
+                + '<strong>' + esc(d.name) + '</strong> ' + rustNote + flags + hostNote
                 + (d.os ? ' <span class="text-muted">' + esc(d.os) + '</span>' : '') + '</label>';
         }).join('');
     }
@@ -145,7 +149,7 @@
         }
         const rows = right.map(d => {
             const href = RUSTED.device + '/' + encodeURIComponent(d.name);
-            return '<label class="list-group-item" data-host="' + esc(d.name) + '" data-meta="' + esc(d.driver || '') + '"'
+            return '<label class="list-group-item" data-host="' + esc(d.name) + '" data-meta="' + esc((d.host || '') + ' ' + (d.driver || '')) + '"'
                 + ' style="font-weight:normal;cursor:pointer">'
                 + '<input type="checkbox" class="sync-check"> '
                 + '<strong>' + esc(d.name) + '</strong> <small class="text-muted">(' + esc(d.driver || '') + ')</small> '
@@ -172,6 +176,11 @@
     function selectedIn($list) {
         return Array.from($list.querySelectorAll('.sync-check:checked'))
             .map(cb => cb.closest('.list-group-item').getAttribute('data-host'));
+    }
+
+    function selectedIdsIn($list) {
+        return Array.from($list.querySelectorAll('.sync-check:checked'))
+            .map(cb => Number(cb.closest('.list-group-item').getAttribute('data-id')));
     }
 
     async function loadDrivers() {
@@ -207,7 +216,7 @@
 
     document.getElementById('sync-add').addEventListener('click', async function () {
         const btn = this;
-        const devices = selectedIn($left);
+        const devices = selectedIdsIn($left);
         if (!devices.length) return alertBox('warning', 'Select devices from the left list.');
         if (!driverSel.value) return alertBox('warning', 'Pick a driver.');
         if (!credSel.value) return alertBox('warning', 'Pick a credential.');

@@ -31,8 +31,8 @@ the `rusted serve` HTTP API.
   once (one driver + credential per batch) or disable them.
 - A **Configuration Backups panel on every device's Overview page** showing the
   last backup with enable/disable, back up now, history and delete buttons, and a
-  one-click "Add to rusted" when the device isn't managed yet (matched on
-  hostname).
+  one-click "Add to rusted" when the device isn't managed yet (see
+  [Device names](#device-names)).
 - Deleting a device first **downloads its configuration history as a zip**; the
   delete proceeds only if that download succeeds (or there is nothing to
   archive and you confirm).
@@ -205,10 +205,28 @@ Shows the latest configuration with **Raw** (download what is displayed) and
 `MANIFEST.txt`) buttons, then the revision list (view any revision, or diff it
 against its parent), a two-revision diff, and the backup runs.
 
+### Device names
+
+A device added from LibreNMS is named in rusted after its **LibreNMS display
+name**, so if LibreNMS shows sysName instead of hostname (the
+`device_display_default` setting, or a device's own display name), so do rusted,
+the backup repo and this plugin. rusted still connects to the LibreNMS
+hostname/IP. A display name rusted can't use as a device name (one containing
+`/`, for example) falls back to the hostname.
+
+An existing rusted device belongs to a LibreNMS device when, case-insensitively:
+
+1. its name is the LibreNMS display name, or
+2. its name is the LibreNMS hostname (devices added by IP before this), or
+3. its host is the LibreNMS hostname and no other rusted device has that host
+   (devices named by hand).
+
+Existing devices are not renamed. To move one to its sysName, run
+`rusted device rename OLD NEW` on the rusted server; its history follows.
+
 ### Device sync (`plugin/rusted/sync`)
 
-Devices are matched on **LibreNMS hostname == rusted device name**
-(case-insensitive).
+Devices are matched as described in [Device names](#device-names).
 
 - **Left:** LibreNMS devices not backed up by rusted, either absent or disabled
   in rusted.
