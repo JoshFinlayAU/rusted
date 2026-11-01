@@ -30,12 +30,8 @@ class DeviceMap
     public function __construct(array $rusted)
     {
         foreach ($rusted as $r) {
-            if (! is_array($r) || empty($r['name'])) {
-                continue;
-            }
-            $this->byName[strtolower((string) $r['name'])] = $r;
-            if (! empty($r['host'])) {
-                $this->byHost[strtolower((string) $r['host'])][] = $r;
+            if (is_array($r)) {
+                $this->add($r);
             }
         }
     }
@@ -50,14 +46,22 @@ class DeviceMap
     }
 
     /**
-     * The name a LibreNMS device gets in rusted: its display name, or its
-     * hostname when the display name is not a valid rusted device name.
+     * Records a rusted device (e.g. one just added), so later lookups and
+     * nameFor() calls in the same batch take it into account.
+     *
+     * @param  array<string, mixed>  $r
      */
-    public static function nameFor(Device $d): string
+    public function add(array $r): void
     {
-        $name = method_exists($d, 'displayName') ? trim((string) $d->displayName()) : '';
-
-        return self::validName($name) ? $name : (string) $d->hostname;
+        $name = (string) ($r['name'] ?? '');
+        if ($name === '') {
+            return;
+        }
+        $this->byName[strtolower($name)] = $r;
+        $host = (string) ($r['host'] ?? '');
+        if ($host !== '') {
+            $this->byHost[strtolower($host)][] = $r;
+        }
     }
 
     /** The rusted device that corresponds to $d, or null if it has none. */
@@ -65,16 +69,53 @@ class DeviceMap
     {
         $host = strtolower((string) $d->hostname);
 
-        return $this->byName[strtolower(self::nameFor($d))]
-            ?? $this->byName[$host]
+        // A display-name match only counts on the same host: two LibreNMS
+        // devices can share a sysName, and must not share a rusted device.
+        $display = self::displayName($d);
+        $r = $display !== null ? ($this->byName[strtolower($display)] ?? null) : null;
+        if ($r !== null && strtolower((string) ($r['host'] ?? '')) === $host) {
+            return $r;
+        }
+
+        return $this->byName[$host]
             ?? (count($this->byHost[$host] ?? []) === 1 ? $this->byHost[$host][0] : null);
     }
 
-    /** Mirrors rusted's device-name rules (one path segment). */
+    /**
+     * The name a LibreNMS device gets when added to rusted: its display name,
+     * or its hostname when the display name is not a valid rusted device name
+     * or already belongs to a rusted device on another host.
+     */
+    public function nameFor(Device $d): string
+    {
+        $display = self::displayName($d);
+        if ($display !== null) {
+            $taken = $this->byName[strtolower($display)] ?? null;
+            if ($taken === null || strtolower((string) ($taken['host'] ?? '')) === strtolower((string) $d->hostname)) {
+                return $display;
+            }
+        }
+
+        return (string) $d->hostname;
+    }
+
+    /** $d's LibreNMS display name, or null if rusted can't use it as a device name. */
+    private static function displayName(Device $d): ?string
+    {
+        $name = method_exists($d, 'displayName') ? trim((string) $d->displayName()) : '';
+
+        return self::validName($name) ? $name : null;
+    }
+
+    /**
+     * Mirrors rusted's device-name rules (one path segment, no control
+     * characters: \p{Cc} covers C0, DEL and C1 like Go's unicode.IsControl).
+     * Invalid UTF-8 makes preg_match fail, which also rejects the name.
+     */
     private static function validName(string $name): bool
     {
         return $name !== '' && $name !== '.' && $name !== '..'
             && ! str_starts_with($name, '-')
-            && ! preg_match('/[\/\\\\\x00-\x1f\x7f]/', $name);
+            && preg_match('/[\/\\\\\p{Cc}]/u', $name) === 0;
     }
 }

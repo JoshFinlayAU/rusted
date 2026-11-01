@@ -311,7 +311,7 @@ class RustedController extends Controller
             }
             $left[] = [
                 'id' => $d->device_id,
-                'name' => $r['name'] ?? DeviceMap::nameFor($d),
+                'name' => $r['name'] ?? $map->nameFor($d),
                 'hostname' => $d->hostname,
                 'os' => $d->os,
                 'status' => (bool) $d->status,
@@ -324,7 +324,7 @@ class RustedController extends Controller
         $right = [];
         $grey = [];
         foreach ($rusted as $r) {
-            if (! is_array($r) || empty($r['name'])) {
+            if (! is_array($r) || (string) ($r['name'] ?? '') === '') { // not empty(): "0" is a valid name
                 continue;
             }
             $entry = [
@@ -374,12 +374,13 @@ class RustedController extends Controller
                 $failed[] = ['name' => (string) $id, 'error' => 'not a LibreNMS device'];
                 continue;
             }
-            $name = $map->find($d)['name'] ?? DeviceMap::nameFor($d);
+            $name = $map->find($d)['name'] ?? $map->nameFor($d);
 
             $changes = ['driver' => $data['driver'], 'credential' => $data['credential'], 'enabled' => true];
             $r = $this->upsertDevice($name, $changes, ['name' => $name, 'host' => $d->hostname]);
             if ($r->getStatusCode() < 300) {
                 $added[] = $name;
+                $map->add(['name' => $name, 'host' => $d->hostname]);
             } else {
                 $failed[] = ['name' => $name, 'error' => $r->getData(true)['error'] ?? ('HTTP '.$r->getStatusCode())];
             }
@@ -407,7 +408,7 @@ class RustedController extends Controller
 
         return response()->json([
             'name' => $map->find($d)['name'] ?? null,
-            'suggested' => DeviceMap::nameFor($d),
+            'suggested' => $map->nameFor($d),
             'host' => $d->hostname,
         ]);
     }

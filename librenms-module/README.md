@@ -211,12 +211,13 @@ A device added from LibreNMS is named in rusted after its **LibreNMS display
 name**, so if LibreNMS shows sysName instead of hostname (the
 `device_display_default` setting, or a device's own display name), so do rusted,
 the backup repo and this plugin. rusted still connects to the LibreNMS
-hostname/IP. A display name rusted can't use as a device name (one containing
-`/`, for example) falls back to the hostname.
+hostname/IP. The hostname is used instead when the display name isn't a valid
+rusted device name (one containing `/`, for example), or when a rusted device on
+another host already has it (two LibreNMS devices sharing a sysName).
 
 An existing rusted device belongs to a LibreNMS device when, case-insensitively:
 
-1. its name is the LibreNMS display name, or
+1. its name is the LibreNMS display name and its host is the LibreNMS hostname, or
 2. its name is the LibreNMS hostname (devices added by IP before this), or
 3. its host is the LibreNMS hostname and no other rusted device has that host
    (devices named by hand).
