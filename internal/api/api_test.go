@@ -47,3 +47,12 @@ func TestExecuteValidatesInput(t *testing.T) {
 		}
 	}
 }
+
+func TestHealthzReportsVersion(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	res := httptest.NewRecorder()
+	(&Server{Token: "test-token", Version: "1.2.3"}).Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"version":"1.2.3"`) {
+		t.Fatalf("healthz = %d %s; want 200 with version 1.2.3", res.Code, res.Body.String())
+	}
+}

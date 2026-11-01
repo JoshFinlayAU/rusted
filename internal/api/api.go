@@ -33,6 +33,9 @@ type Server struct {
 	Git    *gitstore.Store
 	Engine *backup.Engine
 	Token  string
+	// Version is reported on /healthz so clients (the LibreNMS plugin) can tell
+	// which rusted they talk to.
+	Version string
 	// AllowExec enables POST /api/devices/{name}/execute.
 	AllowExec bool
 }
@@ -41,7 +44,7 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": s.Version})
 	})
 	mux.HandleFunc("GET /api/drivers", s.listDrivers)
 	mux.HandleFunc("GET /api/transports", s.listTransports)

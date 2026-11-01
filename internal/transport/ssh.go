@@ -86,7 +86,7 @@ func dialClient(ctx context.Context, t Target) (*ssh.Client, error) {
 	d := net.Dialer{Timeout: t.Timeout}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", addr, err)
+		return nil, err // a *net.OpError already reads "dial tcp <addr>: ..."
 	}
 	sc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {

@@ -137,6 +137,13 @@ func Register(t Transport) {
 	registry[t.Name()] = t
 }
 
+// Unregister removes a transport, so tests can register a fake per run.
+func Unregister(name string) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(registry, name)
+}
+
 // Get returns the named transport.
 func Get(name string) (Transport, error) {
 	mu.RLock()

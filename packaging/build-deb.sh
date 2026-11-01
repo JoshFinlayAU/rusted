@@ -29,7 +29,7 @@ trap 'rm -rf "$STAGE"' EXIT
 echo "==> Building static rusted ${VERSION} (${ARCH})"
 mkdir -p "$STAGE/usr/bin" "$STAGE/lib/systemd/system" "$STAGE/DEBIAN"
 CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
-    go build -trimpath -ldflags "-s -w" -o "$STAGE/usr/bin/rusted" ./cmd/rusted
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$STAGE/usr/bin/rusted" ./cmd/rusted
 
 install -m 0644 packaging/rusted.service "$STAGE/lib/systemd/system/rusted.service"
 

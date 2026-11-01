@@ -179,7 +179,7 @@ rusted serve --addr :8080 --token "$(openssl rand -hex 32)"
 ```
 
 All `/api/*` routes require `Authorization: Bearer $RUSTED_API_TOKEN`
-(`/healthz` is open). Endpoints:
+(`/healthz` is open and reports the running version, as does `rusted --version`). Endpoints:
 
 | Method & path | Description |
 |---|---|
