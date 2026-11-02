@@ -1,0 +1,13 @@
+[Unit]
+Description=Run rusted backups nightly
+Documentation=https://github.com/JoshFinlayAU/rusted
+
+[Timer]
+# Change the time with: systemctl edit rusted-backup.timer
+OnCalendar=*-*-* 02:00:00
+# Catch up if the machine was off at 02:00.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

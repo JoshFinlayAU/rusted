@@ -1,0 +1,10 @@
+[Unit]
+Description=rusted — back up all network device configs
+Documentation=https://github.com/JoshFinlayAU/rusted
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rusted --config /etc/rusted/config.toml backup run --all
+WorkingDirectory=/var/lib/rusted

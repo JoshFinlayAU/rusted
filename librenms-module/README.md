@@ -88,6 +88,12 @@ the LibreNMS server needs to reach it:
 rusted serve --addr 127.0.0.1:8080   # token comes from rusted's config file
 ```
 
+The `.deb` package runs this as `rusted.service` and also enables
+`rusted-backup.timer`, which backs up every enabled device nightly. `rusted serve`
+itself never schedules backups: the plugin only triggers them on demand, so on a
+source install set up the timer or cron job from rusted's README
+("Scheduled backups"), or devices added here are backed up only when you click.
+
 Then, on the LibreNMS host (install directory is usually `/opt/librenms`),
 install the plugin as a Composer package.
 
