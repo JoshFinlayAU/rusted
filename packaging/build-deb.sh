@@ -82,9 +82,11 @@ case "$1" in
     if [ -e /usr/local/bin/rusted ] && [ ! /usr/local/bin/rusted -ef /usr/bin/rusted ]; then
         echo "rusted: warning: /usr/local/bin/rusted (from install.sh) shadows /usr/bin/rusted; remove it" >&2
     fi
-    if [ -e /etc/systemd/system/rusted.service ]; then
-        echo "rusted: warning: /etc/systemd/system/rusted.service overrides the packaged unit; remove it and run systemctl daemon-reload" >&2
-    fi
+    for u in rusted.service rusted-backup.service rusted-backup.timer; do
+        if [ -e /etc/systemd/system/$u ]; then
+            echo "rusted: warning: /etc/systemd/system/$u overrides the packaged unit; remove it and run systemctl daemon-reload" >&2
+        fi
+    done
     ;;
 esac
 exit 0
@@ -101,6 +103,8 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
         systemctl stop rusted-backup.timer rusted.service || true
         systemctl disable rusted-backup.timer rusted.service >/dev/null 2>&1 || true
     fi
+    # Forget the timer was enabled, so a later reinstall enables it again.
+    rm -f /var/lib/rusted/.backup-timer-enabled
 fi
 exit 0
 EOF

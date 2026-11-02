@@ -71,9 +71,11 @@ Upgrade by installing a newer `.deb` the same way. To move the backup time, run
 `sudo systemctl edit rusted-backup.timer` (see [Scheduled backups](#scheduled-backups)).
 
 > **Switching from `install.sh --global` to the package?** Remove the old
-> `/usr/local/bin/rusted` and `/etc/systemd/system/rusted.service`, then
-> `sudo systemctl daemon-reload`. Both take precedence over the packaged files,
-> so you would keep running the old binary. The package warns if it finds them.
+> `/usr/local/bin/rusted` and the units it wrote to `/etc/systemd/system`
+> (`rusted.service`, `rusted-backup.service`, `rusted-backup.timer`), then run
+> `sudo systemctl daemon-reload && sudo systemctl enable --now rusted-backup.timer`.
+> They take precedence over the packaged files, so you would keep running the old
+> binary. The package warns if it finds them.
 
 ### From source
 
