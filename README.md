@@ -39,6 +39,46 @@ Also bundled: `cisco_ios`, `cisco_asa`, `arista_eos`, `fortinet`, `vyos`,
 
 ## Install
 
+### Debian / Ubuntu package (recommended)
+
+Each [release](https://github.com/JoshFinlayAU/rusted/releases) ships `.deb`
+packages for amd64 and arm64:
+
+```sh
+VER=0.2.1   # latest release
+curl -fsSLO https://github.com/JoshFinlayAU/rusted/releases/download/v$VER/rusted_${VER}_amd64.deb
+sudo dpkg -i rusted_${VER}_amd64.deb
+```
+
+The package installs `/usr/bin/rusted`, generates `/etc/rusted/config.toml`
+(random API token and encryption secret, never overwritten), initialises
+`/var/lib/rusted`, and enables two systemd units:
+
+| Unit | Does |
+|---|---|
+| `rusted.service` | the HTTP API (`rusted serve`) used by LibreNMS / My Mate |
+| `rusted-backup.timer` | runs `rusted backup run --all` nightly at 02:00 |
+
+Check both after installing:
+
+```sh
+rusted --version
+curl -s localhost:8080/healthz              # {"status":"ok","version":"…"}
+systemctl list-timers rusted-backup.timer   # next backup run
+```
+
+Upgrade by installing a newer `.deb` the same way. To move the backup time, run
+`sudo systemctl edit rusted-backup.timer` (see [Scheduled backups](#scheduled-backups)).
+
+> **Switching from `install.sh --global` to the package?** Remove the old
+> `/usr/local/bin/rusted` and the units it wrote to `/etc/systemd/system`
+> (`rusted.service`, `rusted-backup.service`, `rusted-backup.timer`), then run
+> `sudo systemctl daemon-reload && sudo systemctl enable --now rusted-backup.timer`.
+> They take precedence over the packaged files, so you would keep running the old
+> binary. The package warns if it finds them.
+
+### From source
+
 The installer builds rusted, installs the binary, generates a config file with a
 random API token and encryption secret, and initialises the database and backup
 repo. Requires Go 1.26+ and `git`.
@@ -46,7 +86,8 @@ repo. Requires Go 1.26+ and `git`.
 ```sh
 ./install.sh             # install for the current user (default)
 ./install.sh --global    # install system-wide (uses sudo)
-./install.sh --global --service   # also install + enable a systemd service
+./install.sh --global --service   # also install + enable the API service
+                                  # and the nightly backup timer
 ```
 
 | | User install | Global install |
@@ -57,6 +98,10 @@ repo. Requires Go 1.26+ and `git`.
 
 (Paths honour `XDG_*` overrides.) Re-running the installer never overwrites an
 existing config, so encrypted credentials stay readable across upgrades.
+
+Without `--service`, nothing runs backups on a schedule: `rusted serve` only
+answers API requests. Set up cron or a timer as in
+[Scheduled backups](#scheduled-backups).
 
 To build manually instead: `go build -o rusted ./cmd/rusted`.
 
@@ -254,6 +299,19 @@ never create noise in your git history. A run is recorded as `success`
 (committed), `unchanged` (no diff), or `failed`.
 
 ## Scheduled backups
+
+The `.deb` and `install.sh --global --service` already install and enable the
+timer below (nightly at 02:00); this section is for other installs, or to change
+the schedule. To change the time on an existing timer:
+
+```sh
+sudo systemctl edit rusted-backup.timer
+# [Timer]
+# OnCalendar=
+# OnCalendar=*-*-* 03:30:00
+```
+
+The empty `OnCalendar=` clears the default before setting a new one.
 
 `rusted backup run --all` backs up every enabled device, then exits — ideal for
 a scheduler. It exits non-zero if any device failed, so cron/systemd surface

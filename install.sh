@@ -7,6 +7,7 @@
 #   ./install.sh --user     # same as above
 #   ./install.sh --global   # install system-wide (uses sudo as needed)
 #   ./install.sh --global --service   # also install+enable a systemd service
+#                                     # and a nightly backup timer (02:00)
 #
 # User install:
 #   binary  -> ~/.local/bin/rusted
@@ -26,6 +27,7 @@ set -euo pipefail
 
 MODE="user"
 INSTALL_SERVICE=0
+TIMER_INSTALLED=0
 
 usage() {
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
@@ -136,9 +138,37 @@ WorkingDirectory=$DATA_DIR
 [Install]
 WantedBy=multi-user.target
 EOF
+        echo "==> Installing nightly backup timer (02:00)"
+        $SUDO tee /etc/systemd/system/rusted-backup.service >/dev/null <<EOF
+[Unit]
+Description=rusted — back up all network device configs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$BIN_PATH --config $CONFIG_FILE backup run --all
+WorkingDirectory=$DATA_DIR
+EOF
+        $SUDO tee /etc/systemd/system/rusted-backup.timer >/dev/null <<EOF
+[Unit]
+Description=Run rusted backups nightly
+
+[Timer]
+# Change the time with: systemctl edit rusted-backup.timer
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+EOF
         $SUDO systemctl daemon-reload
         $SUDO systemctl enable --now rusted.service
         echo "    service enabled and started (systemctl status rusted)."
+        $SUDO systemctl enable --now rusted-backup.timer
+        echo "    backups scheduled nightly (systemctl list-timers rusted-backup.timer)."
+        TIMER_INSTALLED=1
     fi
 fi
 
@@ -156,4 +186,10 @@ echo "  rusted device add r1 -H 10.0.0.1 -d cisco_nxos -c lab"
 echo "  rusted backup run --all"
 if [ "$MODE" = "global" ] && [ "$INSTALL_SERVICE" -ne 1 ]; then
     echo "  rusted serve            # or re-run with --service to run it under systemd"
+    echo "                          # (--service also schedules nightly backups)"
+fi
+if [ "$TIMER_INSTALLED" -ne 1 ]; then
+    echo
+    echo "Backups do not run on their own: schedule 'rusted backup run --all'"
+    echo "(see \"Scheduled backups\" in README.md)."
 fi
