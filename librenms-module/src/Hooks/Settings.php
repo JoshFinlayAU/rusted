@@ -3,7 +3,6 @@
 namespace AthenaNetworks\RustedLibrenms\Hooks;
 
 use AthenaNetworks\RustedLibrenms\Support\RustedClient;
-use Illuminate\Foundation\Auth\User;
 use LibreNMS\Interfaces\Plugins\Hooks\SettingsHook;
 
 class Settings implements SettingsHook
@@ -11,9 +10,9 @@ class Settings implements SettingsHook
     /** The oldest rusted this plugin works with (device status, upsert edits, transports). */
     public const MIN_RUSTED = '0.2.0';
 
-    public function authorize(User $user): bool
+    public function authorize(): bool
     {
-        return $user->can('admin');
+        return (bool) auth()->user()?->can('admin');
     }
 
     /**
